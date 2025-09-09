@@ -1,0 +1,66 @@
+{
+  "CreatedAt": "2025-09-09T09:00:13.6311947-06:00",
+  "SourceDirectory": "C:\\Users\\michael.nielsen\\source\\repos\\PrivacyLens\\PrivacyLens\\PrivacyLens\\bin\\Debug\\net8.0\\governance\\Source Documents",
+  "Documents": [
+    {
+      "FileName": "Education Act 2012 Chapter E-0.3.pdf",
+      "FilePath": "C:\\Users\\michael.nielsen\\source\\repos\\PrivacyLens\\PrivacyLens\\PrivacyLens\\bin\\Debug\\net8.0\\governance\\Source Documents\\Education Act 2012 Chapter E-0.3.pdf",
+      "FileSizeBytes": 1337349,
+      "LastModified": "2025-09-04T10:11:06.9478035-06:00",
+      "FileType": ".pdf",
+      "Category": "PolicyLegal",
+      "Structure": "Hierarchical",
+      "Sensitivity": "Unknown",
+      "DocumentId": "bceec5e5-6d44-4e2b-ad57-1e704ada06d9",
+      "DiscoveredAt": "2025-09-09T09:00:13.6664316-06:00",
+      "DocumentHash": "",
+      "AdditionalMetadata": {
+        "ChunkingStrategy": "Structure-Aware"
+      },
+      "LikelyContainsTables": false,
+      "LikelyContainsPersonalInfo": false,
+      "RequiresStructurePreservation": false,
+      "DetectedLanguage": "en",
+      "ReviewedForPIPA": false,
+      "ReviewedForFOIP": false,
+      "FileSizeFormatted": "1.28 MB"
+    },
+    {
+      "FileName": "POPA Collection Notice Fact Sheet.pdf",
+      "FilePath": "C:\\Users\\michael.nielsen\\source\\repos\\PrivacyLens\\PrivacyLens\\PrivacyLens\\bin\\Debug\\net8.0\\governance\\Source Documents\\POPA Collection Notice Fact Sheet.pdf",
+      "FileSizeBytes": 162981,
+      "LastModified": "2025-09-04T16:15:15.1605368-06:00",
+      "FileType": ".pdf",
+      "Category": "Unknown",
+      "Structure": "Linear",
+      "Sensitivity": "Unknown",
+      "DocumentId": "affe4468-c14d-4111-bce7-454f98c44260",
+      "DiscoveredAt": "2025-09-09T09:00:29.2935167-06:00",
+      "DocumentHash": "",
+      "AdditionalMetadata": {
+        "ChunkingStrategy": "Recursive"
+      },
+      "LikelyContainsTables": false,
+      "LikelyContainsPersonalInfo": false,
+      "RequiresStructurePreservation": false,
+      "DetectedLanguage": "en",
+      "ReviewedForPIPA": false,
+      "ReviewedForFOIP": false,
+      "FileSizeFormatted": "159.16 KB"
+    }
+  ],
+  "CategoryCounts": {
+    "PolicyLegal": 1,
+    "Unknown": 1
+  },
+  "StructureCounts": {
+    "Hierarchical": 1,
+    "Linear": 1
+  },
+  "SensitivityCounts": {
+    "Unknown": 2
+  },
+  "TotalDocuments": 2,
+  "TotalSizeBytes": 1500330,
+  "DocumentsRequiringSpecialHandling": 0
+}

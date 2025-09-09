@@ -1,0 +1,24 @@
+C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\bin\Debug\net8.0\PrivacyLens.exe
+C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\bin\Debug\net8.0\PrivacyLens.deps.json
+C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\bin\Debug\net8.0\PrivacyLens.runtimeconfig.json
+C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\bin\Debug\net8.0\PrivacyLens.dll
+C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\bin\Debug\net8.0\PrivacyLens.pdb
+C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\obj\Debug\net8.0\PrivacyLens.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\obj\Debug\net8.0\PrivacyLens.AssemblyInfoInputs.cache
+C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\obj\Debug\net8.0\PrivacyLens.AssemblyInfo.cs
+C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\obj\Debug\net8.0\PrivacyLens.csproj.CoreCompileInputs.cache
+C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\obj\Debug\net8.0\PrivacyLens.sourcelink.json
+C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\obj\Debug\net8.0\PrivacyLens.dll
+C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\obj\Debug\net8.0\refint\PrivacyLens.dll
+C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\obj\Debug\net8.0\PrivacyLens.pdb
+C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\obj\Debug\net8.0\PrivacyLens.genruntimeconfig.cache
+C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\obj\Debug\net8.0\ref\PrivacyLens.dll
+C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\bin\Debug\net8.0\Governance\Source Documents\Education Act 2012 Chapter E-0.3.pdf
+C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\bin\Debug\net8.0\Governance\Source Documents\POPA Collection Notice Fact Sheet.pdf
+C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\bin\Debug\net8.0\appsettings.json
+C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\bin\Debug\net8.0\Microsoft.Extensions.DependencyInjection.Abstractions.dll
+C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\bin\Debug\net8.0\Microsoft.Extensions.Logging.Abstractions.dll
+C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\bin\Debug\net8.0\Npgsql.dll
+C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\bin\Debug\net8.0\Pgvector.dll
+C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\obj\Debug\net8.0\PrivacyLens.csproj.AssemblyReference.cache
+C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\obj\Debug\net8.0\PrivacyL.B8312B63.Up2Date

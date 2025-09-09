@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "dgSpecHash": "vgj4jDXA0Dg=",
+  "success": true,
+  "projectFilePath": "C:\\Users\\michael.nielsen\\source\\repos\\PrivacyLens\\PrivacyLens\\PrivacyLens\\PrivacyLens.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\michael.nielsen\\.nuget\\packages\\microsoft.extensions.dependencyinjection.abstractions\\8.0.2\\microsoft.extensions.dependencyinjection.abstractions.8.0.2.nupkg.sha512",
+    "C:\\Users\\michael.nielsen\\.nuget\\packages\\microsoft.extensions.logging.abstractions\\8.0.2\\microsoft.extensions.logging.abstractions.8.0.2.nupkg.sha512",
+    "C:\\Users\\michael.nielsen\\.nuget\\packages\\npgsql\\9.0.3\\npgsql.9.0.3.nupkg.sha512",
+    "C:\\Users\\michael.nielsen\\.nuget\\packages\\pgvector\\0.3.2\\pgvector.0.3.2.nupkg.sha512"
+  ],
+  "logs": []
+}

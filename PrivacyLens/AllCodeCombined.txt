@@ -1,0 +1,2019 @@
+
+
+# ===== File: C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\appsettings.json =====
+
+{
+  "PrivacyLens": {
+    "DocumentCategories": [ "Policy & Legal", "Operational", "Administrative", "Forms & Templates", "Reports", "Communications", "Financial", "Technical", "Web Content", "Other" ],
+    "DocumentStructures": [ "Hierarchical", "Tabular", "Linear", "Mixed", "List-Based" ],
+    "ChunkingStrategies": [ "Recursive", "Structure-Aware", "Table-Aware", "Section-Based", "Form-Preserving" ],
+    "SupportedFileTypes": [ ".pdf", ".docx", ".doc", ".txt", ".html", ".htm", ".csv", ".xlsx", ".xls" ],
+    "Paths": {
+      "SourceDocuments": "governance\\Source Documents",
+      "WebContent": "governance\\Web Content",
+      "TempFiles": "governance\\temp"
+    }
+  },
+  "ConnectionStrings": {
+    "PostgresApp": "Host=gps-filesync.grasslands.ab.ca;Port=5432;Database=privacy_lens;Username=privacy_app;Password=Strong#Passw0rd!;Pooling=true;Timeout=15;SslMode=Disable"
+  }
+}
+
+
+
+# ===== File: C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\Program.cs =====
+
+using PrivacyLens.Menus;
+
+namespace PrivacyLens
+{
+    internal class Program
+    {
+        static void Main(string[] args)
+        {
+            // No DB init here—we’ll run it from Settings ? Initialize Database
+            var mainMenu = new MainMenu();
+            mainMenu.Show();
+        }
+    }
+}
+
+
+
+# ===== File: C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\bin\Debug\net8.0\appsettings.json =====
+
+{
+  "PrivacyLens": {
+    "DocumentCategories": [ "Policy & Legal", "Operational", "Administrative", "Forms & Templates", "Reports", "Communications", "Financial", "Technical", "Web Content", "Other" ],
+    "DocumentStructures": [ "Hierarchical", "Tabular", "Linear", "Mixed", "List-Based" ],
+    "ChunkingStrategies": [ "Recursive", "Structure-Aware", "Table-Aware", "Section-Based", "Form-Preserving" ],
+    "SupportedFileTypes": [ ".pdf", ".docx", ".doc", ".txt", ".html", ".htm", ".csv", ".xlsx", ".xls" ],
+    "Paths": {
+      "SourceDocuments": "governance\\Source Documents",
+      "WebContent": "governance\\Web Content",
+      "TempFiles": "governance\\temp"
+    }
+  },
+  "ConnectionStrings": {
+    "PostgresApp": "Host=gps-filesync.grasslands.ab.ca;Port=5432;Database=privacy_lens;Username=privacy_app;Password=Strong#Passw0rd!;Pooling=true;Timeout=15;SslMode=Disable"
+  }
+}
+
+
+
+# ===== File: C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\bin\Debug\net8.0\PrivacyLens.deps.json =====
+
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v8.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v8.0": {
+      "PrivacyLens/1.0.0": {
+        "dependencies": {
+          "Npgsql": "9.0.3",
+          "Pgvector": "0.3.2"
+        },
+        "runtime": {
+          "PrivacyLens.dll": {}
+        }
+      },
+      "Microsoft.Extensions.DependencyInjection.Abstractions/8.0.2": {
+        "runtime": {
+          "lib/net8.0/Microsoft.Extensions.DependencyInjection.Abstractions.dll": {
+            "assemblyVersion": "8.0.0.0",
+            "fileVersion": "8.0.1024.46610"
+          }
+        }
+      },
+      "Microsoft.Extensions.Logging.Abstractions/8.0.2": {
+        "dependencies": {
+          "Microsoft.Extensions.DependencyInjection.Abstractions": "8.0.2"
+        },
+        "runtime": {
+          "lib/net8.0/Microsoft.Extensions.Logging.Abstractions.dll": {
+            "assemblyVersion": "8.0.0.0",
+            "fileVersion": "8.0.1024.46610"
+          }
+        }
+      },
+      "Npgsql/9.0.3": {
+        "dependencies": {
+          "Microsoft.Extensions.Logging.Abstractions": "8.0.2"
+        },
+        "runtime": {
+          "lib/net8.0/Npgsql.dll": {
+            "assemblyVersion": "9.0.3.0",
+            "fileVersion": "9.0.3.0"
+          }
+        }
+      },
+      "Pgvector/0.3.2": {
+        "dependencies": {
+          "Npgsql": "9.0.3"
+        },
+        "runtime": {
+          "lib/net6.0/Pgvector.dll": {
+            "assemblyVersion": "0.3.2.0",
+            "fileVersion": "0.3.2.0"
+          }
+        }
+      }
+    }
+  },
+  "libraries": {
+    "PrivacyLens/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "Microsoft.Extensions.DependencyInjection.Abstractions/8.0.2": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-3iE7UF7MQkCv1cxzCahz+Y/guQbTqieyxyaWKhrRO91itI9cOKO76OHeQDahqG4MmW5umr3CcCvGmK92lWNlbg==",
+      "path": "microsoft.extensions.dependencyinjection.abstractions/8.0.2",
+      "hashPath": "microsoft.extensions.dependencyinjection.abstractions.8.0.2.nupkg.sha512"
+    },
+    "Microsoft.Extensions.Logging.Abstractions/8.0.2": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-nroMDjS7hNBPtkZqVBbSiQaQjWRDxITI8Y7XnDs97rqG3EbzVTNLZQf7bIeUJcaHOV8bca47s1Uxq94+2oGdxA==",
+      "path": "microsoft.extensions.logging.abstractions/8.0.2",
+      "hashPath": "microsoft.extensions.logging.abstractions.8.0.2.nupkg.sha512"
+    },
+    "Npgsql/9.0.3": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-tPvY61CxOAWxNsKLEBg+oR646X4Bc8UmyQ/tJszL/7mEmIXQnnBhVJZrZEEUv0Bstu0mEsHZD5At3EO8zQRAYw==",
+      "path": "npgsql/9.0.3",
+      "hashPath": "npgsql.9.0.3.nupkg.sha512"
+    },
+    "Pgvector/0.3.2": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-n7M5LuNejHUmtWky3zCbNO+tP1Gnjiuv9Qtu4LyvB1602dD8RiBxxCQp9jEjM0ZFDxAZF1oOWkNIkXw46KT00Q==",
+      "path": "pgvector/0.3.2",
+      "hashPath": "pgvector.0.3.2.nupkg.sha512"
+    }
+  }
+}
+
+
+# ===== File: C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\bin\Debug\net8.0\PrivacyLens.runtimeconfig.json =====
+
+{
+  "runtimeOptions": {
+    "tfm": "net8.0",
+    "framework": {
+      "name": "Microsoft.NETCore.App",
+      "version": "8.0.0"
+    },
+    "configProperties": {
+      "System.Runtime.Serialization.EnableUnsafeBinaryFormatterSerialization": false
+    }
+  }
+}
+
+
+# ===== File: C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\bin\Debug\net8.0\Governance\temp\manifest.json =====
+
+{
+  "CreatedAt": "2025-09-09T09:00:13.6311947-06:00",
+  "SourceDirectory": "C:\\Users\\michael.nielsen\\source\\repos\\PrivacyLens\\PrivacyLens\\PrivacyLens\\bin\\Debug\\net8.0\\governance\\Source Documents",
+  "Documents": [
+    {
+      "FileName": "Education Act 2012 Chapter E-0.3.pdf",
+      "FilePath": "C:\\Users\\michael.nielsen\\source\\repos\\PrivacyLens\\PrivacyLens\\PrivacyLens\\bin\\Debug\\net8.0\\governance\\Source Documents\\Education Act 2012 Chapter E-0.3.pdf",
+      "FileSizeBytes": 1337349,
+      "LastModified": "2025-09-04T10:11:06.9478035-06:00",
+      "FileType": ".pdf",
+      "Category": "PolicyLegal",
+      "Structure": "Hierarchical",
+      "Sensitivity": "Unknown",
+      "DocumentId": "bceec5e5-6d44-4e2b-ad57-1e704ada06d9",
+      "DiscoveredAt": "2025-09-09T09:00:13.6664316-06:00",
+      "DocumentHash": "",
+      "AdditionalMetadata": {
+        "ChunkingStrategy": "Structure-Aware"
+      },
+      "LikelyContainsTables": false,
+      "LikelyContainsPersonalInfo": false,
+      "RequiresStructurePreservation": false,
+      "DetectedLanguage": "en",
+      "ReviewedForPIPA": false,
+      "ReviewedForFOIP": false,
+      "FileSizeFormatted": "1.28 MB"
+    },
+    {
+      "FileName": "POPA Collection Notice Fact Sheet.pdf",
+      "FilePath": "C:\\Users\\michael.nielsen\\source\\repos\\PrivacyLens\\PrivacyLens\\PrivacyLens\\bin\\Debug\\net8.0\\governance\\Source Documents\\POPA Collection Notice Fact Sheet.pdf",
+      "FileSizeBytes": 162981,
+      "LastModified": "2025-09-04T16:15:15.1605368-06:00",
+      "FileType": ".pdf",
+      "Category": "Unknown",
+      "Structure": "Linear",
+      "Sensitivity": "Unknown",
+      "DocumentId": "affe4468-c14d-4111-bce7-454f98c44260",
+      "DiscoveredAt": "2025-09-09T09:00:29.2935167-06:00",
+      "DocumentHash": "",
+      "AdditionalMetadata": {
+        "ChunkingStrategy": "Recursive"
+      },
+      "LikelyContainsTables": false,
+      "LikelyContainsPersonalInfo": false,
+      "RequiresStructurePreservation": false,
+      "DetectedLanguage": "en",
+      "ReviewedForPIPA": false,
+      "ReviewedForFOIP": false,
+      "FileSizeFormatted": "159.16 KB"
+    }
+  ],
+  "CategoryCounts": {
+    "PolicyLegal": 1,
+    "Unknown": 1
+  },
+  "StructureCounts": {
+    "Hierarchical": 1,
+    "Linear": 1
+  },
+  "SensitivityCounts": {
+    "Unknown": 2
+  },
+  "TotalDocuments": 2,
+  "TotalSizeBytes": 1500330,
+  "DocumentsRequiringSpecialHandling": 0
+}
+
+
+# ===== File: C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\Menus\GovernanceMenu.cs =====
+
+using System;
+using PrivacyLens.Services;
+
+namespace PrivacyLens.Menus
+{
+    public class GovernanceMenu
+    {
+        private readonly DocumentDiscoveryService discoveryService;
+
+        public GovernanceMenu()
+        {
+            discoveryService = new DocumentDiscoveryService();
+        }
+
+        public void Show()
+        {
+            bool back = false;
+
+            while (!back)
+            {
+                Console.Clear();
+                Console.WriteLine("========================================");
+                Console.WriteLine("     Governance Database Management     ");
+                Console.WriteLine("========================================");
+                Console.WriteLine();
+                Console.WriteLine("1. Import Source Documents (Interactive Classification)");
+                Console.WriteLine("2. Scrape Division Websites");
+                Console.WriteLine("3. Index All Documents");
+                Console.WriteLine("4. View Statistics");
+                Console.WriteLine("5. Test Search");
+                Console.WriteLine("6. Clear Database");
+                Console.WriteLine("7. Back to Main Menu");
+                Console.WriteLine();
+                Console.Write("Select an option (1-7): ");
+
+                string? choice = Console.ReadLine();
+
+                switch (choice)
+                {
+                    case "1":
+                        RunInteractiveDocumentImport();
+                        break;
+                    case "2":
+                        Console.WriteLine("\nScrape Division Websites (coming soon - Phase 1, Step 2)");
+                        Console.WriteLine("Will implement: WebScrapingService with automatic classification");
+                        Console.WriteLine("Press any key to continue...");
+                        Console.ReadKey();
+                        break;
+                    case "3":
+                        Console.WriteLine("\nIndex All Documents (coming soon - Phase 2)");
+                        Console.WriteLine("Will implement: Chunking based on classification strategies");
+                        Console.WriteLine("Press any key to continue...");
+                        Console.ReadKey();
+                        break;
+                    case "4":
+                        ViewStatistics();
+                        break;
+                    case "5":
+                        Console.WriteLine("\nTest Search (coming soon - Phase 2)");
+                        Console.WriteLine("Will implement: Vector search with chunked documents");
+                        Console.WriteLine("Press any key to continue...");
+                        Console.ReadKey();
+                        break;
+                    case "6":
+                        Console.WriteLine("\nClear Database (coming soon)");
+                        Console.WriteLine("Press any key to continue...");
+                        Console.ReadKey();
+                        break;
+                    case "7":
+                        back = true;
+                        break;
+                    default:
+                        Console.WriteLine("\nInvalid option. Press any key to continue...");
+                        Console.ReadKey();
+                        break;
+                }
+            }
+        }
+
+        private void RunInteractiveDocumentImport()
+        {
+            Console.Clear();
+            Console.WriteLine("========================================");
+            Console.WriteLine("  Document Import & Classification      ");
+            Console.WriteLine("========================================");
+            Console.WriteLine();
+
+            Console.WriteLine("This process will:");
+            Console.WriteLine("  • Scan for documents in the Source Documents folder");
+            Console.WriteLine("  • Let you classify each document interactively");
+            Console.WriteLine("  • Choose categories from your configuration");
+            Console.WriteLine("  • Set document structure and chunking strategy");
+            Console.WriteLine("  • Save classifications for future processing");
+            Console.WriteLine();
+            Console.WriteLine("Press any key to start...");
+            Console.ReadKey();
+
+            // Always use interactive mode for document import
+            var manifest = discoveryService.DiscoverDocuments(useInteractiveMode: true);
+
+            if (manifest.TotalDocuments > 0)
+            {
+                Console.WriteLine();
+                discoveryService.DisplayResults(manifest);
+                discoveryService.SaveManifest(manifest);
+
+                Console.WriteLine("\n[?] Document import complete!");
+                Console.WriteLine($"    Classified {manifest.TotalDocuments} documents");
+
+                Console.WriteLine("\nNext steps:");
+                Console.WriteLine("  1. Review the classification results above");
+                Console.WriteLine("  2. Proceed to web scraping (Option 2) for online content");
+                Console.WriteLine("  3. Then index all documents (Option 3) using the selected strategies");
+            }
+            else
+            {
+                Console.WriteLine("\nNo documents found in the Source Documents folder.");
+                Console.WriteLine("Please add PDF, DOCX, or other supported files and try again.");
+            }
+
+            Console.WriteLine("\nPress any key to continue...");
+            Console.ReadKey();
+        }
+
+        private void ViewStatistics()
+        {
+            Console.Clear();
+            Console.WriteLine("========================================");
+            Console.WriteLine("        Document Statistics             ");
+            Console.WriteLine("========================================");
+            Console.WriteLine();
+
+            var manifest = discoveryService.LoadManifest();
+
+            if (manifest == null || manifest.TotalDocuments == 0)
+            {
+                Console.WriteLine("No document manifest found.");
+                Console.WriteLine("Run 'Import Source Documents' first to generate statistics.");
+            }
+            else
+            {
+                discoveryService.DisplayResults(manifest);
+            }
+
+            Console.WriteLine("\nPress any key to continue...");
+            Console.ReadKey();
+        }
+    }
+}
+
+
+# ===== File: C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\Menus\MainMenu.cs =====
+
+using System;
+
+namespace PrivacyLens.Menus
+{
+    public class MainMenu
+    {
+        private readonly GovernanceMenu governanceMenu = new GovernanceMenu();
+        private readonly SettingsMenu settingsMenu = new SettingsMenu();   // <-- add this
+
+        public void Show()
+        {
+            bool exit = false;
+            while (!exit)
+            {
+                Console.Clear();
+                Console.WriteLine("========================================");
+                Console.WriteLine(" PrivacyLens Assessment System ");
+                Console.WriteLine("========================================");
+                Console.WriteLine();
+                Console.WriteLine("1. Manage Governance Database");
+                Console.WriteLine("2. Create New Assessment");
+                Console.WriteLine("3. View Existing Assessments");
+                Console.WriteLine("4. Scrape Application Website");
+                Console.WriteLine("5. Generate Reports");
+                Console.WriteLine("6. Settings");
+                Console.WriteLine("7. Exit");
+                Console.WriteLine();
+                Console.Write("Select an option (1-7): ");
+                string? choice = Console.ReadLine();
+
+                switch (choice)
+                {
+                    case "1":
+                        governanceMenu.Show();
+                        break;
+
+                    case "2":
+                        Console.WriteLine("\nCreate New Assessment (coming soon)");
+                        Console.WriteLine("Press any key to continue...");
+                        Console.ReadKey();
+                        break;
+
+                    case "3":
+                        Console.WriteLine("\nView Assessments (coming soon)");
+                        Console.WriteLine("Press any key to continue...");
+                        Console.ReadKey();
+                        break;
+
+                    case "4":
+                        Console.WriteLine("\nScrape Website (coming soon)");
+                        Console.WriteLine("Press any key to continue...");
+                        Console.ReadKey();
+                        break;
+
+                    case "5":
+                        Console.WriteLine("\nGenerate Reports (coming soon)");
+                        Console.WriteLine("Press any key to continue...");
+                        Console.ReadKey();
+                        break;
+
+                    case "6":
+                        settingsMenu.Show();  // <-- opens Settings submenu
+                        break;
+
+                    case "7":
+                        exit = true;
+                        Console.WriteLine("\nGoodbye!");
+                        break;
+
+                    default:
+                        Console.WriteLine("\nInvalid option. Press any key to continue...");
+                        Console.ReadKey();
+                        break;
+                }
+            }
+        }
+    }
+}
+
+
+
+
+# ===== File: C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\Menus\SettingsMenu.cs =====
+
+using System;
+using PrivacyLens.Services;
+
+namespace PrivacyLens.Menus
+{
+    public class SettingsMenu
+    {
+        public void Show()
+        {
+            bool back = false;
+
+            while (!back)
+            {
+                Console.Clear();
+                Console.WriteLine("========================================");
+                Console.WriteLine(" Settings");
+                Console.WriteLine("========================================");
+                Console.WriteLine();
+                Console.WriteLine("1. Initialize Database (enable pgvector, create tables & indexes)");
+                Console.WriteLine("B. Back");
+                Console.WriteLine();
+                Console.Write("Select an option: ");
+
+                var choice = Console.ReadLine()?.Trim().ToUpperInvariant();
+
+                switch (choice)
+                {
+                    case "1":
+                        RunInitializeDatabase();
+                        break;
+
+                    case "B":
+                        back = true;
+                        break;
+
+                    default:
+                        Console.WriteLine("\nInvalid option. Press any key to continue...");
+                        Console.ReadKey();
+                        break;
+                }
+            }
+        }
+
+        private void RunInitializeDatabase()
+        {
+            Console.Clear();
+            Console.WriteLine("Initializing database...\n");
+
+            try
+            {
+                // Run the async initializer from this sync entry point
+                DatabaseBootstrapService.InitializeAsync().GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"\n? Initialization failed: {ex.Message}");
+            }
+
+            Console.WriteLine("\nPress any key to return to Settings...");
+            Console.ReadKey();
+        }
+    }
+}
+
+
+
+# ===== File: C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\Models\DocumentInfo.cs =====
+
+using System;
+using System.Collections.Generic;
+
+namespace PrivacyLens.Models
+{
+    // Enhanced document classification based on RAG research Section 6
+    public enum DocumentCategory
+    {
+        Unknown,
+        PolicyLegal,        // Policies, procedures, legal documents
+        Operational,        // Operational docs, guides, manuals  
+        Form,              // Forms, applications, structured documents
+        Report,            // Reports with potential tables/data
+        Correspondence,    // Emails, letters, communications
+        Web,              // Web-scraped content
+        Technical         // Technical documentation
+    }
+
+    public enum DocumentStructure
+    {
+        Unknown,
+        Hierarchical,      // Has clear sections/subsections
+        Tabular,          // Contains significant tables
+        Linear,           // Sequential text without clear structure
+        Mixed            // Combination of structures
+    }
+
+    public enum ContentSensitivity
+    {
+        Unknown,
+        Public,           // Public information
+        Internal,         // Internal use only
+        Confidential,     // Contains confidential information
+        Personal         // Contains personal information (PII)
+    }
+
+    public class DocumentInfo
+    {
+        // Original properties
+        public string FileName { get; set; } = string.Empty;
+        public string FilePath { get; set; } = string.Empty;
+        public long FileSizeBytes { get; set; }
+        public DateTime LastModified { get; set; }
+        public string FileType { get; set; } = string.Empty;
+
+        // New classification properties for RAG chunking strategy selection
+        public DocumentCategory Category { get; set; } = DocumentCategory.Unknown;
+        public DocumentStructure Structure { get; set; } = DocumentStructure.Unknown;
+        public ContentSensitivity Sensitivity { get; set; } = ContentSensitivity.Unknown;
+
+        // Metadata for better routing and processing
+        public string DocumentId { get; set; } = Guid.NewGuid().ToString();
+        public DateTime DiscoveredAt { get; set; } = DateTime.Now;
+        public string DocumentHash { get; set; } = string.Empty; // SHA-256 hash for integrity
+        public Dictionary<string, string> AdditionalMetadata { get; set; } = new Dictionary<string, string>();
+
+        // Hints for chunking strategy selection
+        public bool LikelyContainsTables { get; set; }
+        public bool LikelyContainsPersonalInfo { get; set; }
+        public bool RequiresStructurePreservation { get; set; }
+        public string DetectedLanguage { get; set; } = "en";
+
+        // For Alberta/Canadian compliance tracking
+        public bool ReviewedForPIPA { get; set; } = false;  // Personal Information Protection Act
+        public bool ReviewedForFOIP { get; set; } = false;  // Freedom of Information and Protection of Privacy
+
+        // Helper property to get size in readable format
+        public string FileSizeFormatted
+        {
+            get
+            {
+                string[] sizes = { "B", "KB", "MB", "GB" };
+                int order = 0;
+                double size = FileSizeBytes;
+
+                while (size >= 1024 && order < sizes.Length - 1)
+                {
+                    order++;
+                    size /= 1024;
+                }
+
+                return $"{size:0.##} {sizes[order]}";
+            }
+        }
+
+        // Helper method to determine optimal chunking strategy based on classification
+        public string GetRecommendedChunkingStrategy()
+        {
+            if (Category == DocumentCategory.PolicyLegal && Structure == DocumentStructure.Hierarchical)
+                return "StructureAwareRecursive";
+
+            if (Structure == DocumentStructure.Tabular || LikelyContainsTables)
+                return "TableAware";
+
+            if (Category == DocumentCategory.Correspondence)
+                return "ConversationalContext";
+
+            if (RequiresStructurePreservation)
+                return "StructurePreserving";
+
+            return "RecursiveBaseline";
+        }
+    }
+
+    public class DocumentManifest
+    {
+        public DateTime CreatedAt { get; set; }
+        public string SourceDirectory { get; set; } = string.Empty;
+        public List<DocumentInfo> Documents { get; set; } = new List<DocumentInfo>();
+
+        // New classification statistics
+        public Dictionary<DocumentCategory, int> CategoryCounts { get; set; } = new Dictionary<DocumentCategory, int>();
+        public Dictionary<DocumentStructure, int> StructureCounts { get; set; } = new Dictionary<DocumentStructure, int>();
+        public Dictionary<ContentSensitivity, int> SensitivityCounts { get; set; } = new Dictionary<ContentSensitivity, int>();
+
+        public int TotalDocuments => Documents.Count;
+        public long TotalSizeBytes => Documents.Sum(d => d.FileSizeBytes);
+        public int DocumentsRequiringSpecialHandling => Documents.Count(d => d.LikelyContainsPersonalInfo || d.LikelyContainsTables);
+
+        // Generate classification statistics
+        public void UpdateStatistics()
+        {
+            CategoryCounts.Clear();
+            StructureCounts.Clear();
+            SensitivityCounts.Clear();
+
+            foreach (var doc in Documents)
+            {
+                if (!CategoryCounts.ContainsKey(doc.Category))
+                    CategoryCounts[doc.Category] = 0;
+                CategoryCounts[doc.Category]++;
+
+                if (!StructureCounts.ContainsKey(doc.Structure))
+                    StructureCounts[doc.Structure] = 0;
+                StructureCounts[doc.Structure]++;
+
+                if (!SensitivityCounts.ContainsKey(doc.Sensitivity))
+                    SensitivityCounts[doc.Sensitivity] = 0;
+                SensitivityCounts[doc.Sensitivity]++;
+            }
+        }
+    }
+}
+
+
+# ===== File: C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\obj\PrivacyLens.csproj.nuget.dgspec.json =====
+
+{
+  "format": 1,
+  "restore": {
+    "C:\\Users\\michael.nielsen\\source\\repos\\PrivacyLens\\PrivacyLens\\PrivacyLens\\PrivacyLens.csproj": {}
+  },
+  "projects": {
+    "C:\\Users\\michael.nielsen\\source\\repos\\PrivacyLens\\PrivacyLens\\PrivacyLens\\PrivacyLens.csproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "C:\\Users\\michael.nielsen\\source\\repos\\PrivacyLens\\PrivacyLens\\PrivacyLens\\PrivacyLens.csproj",
+        "projectName": "PrivacyLens",
+        "projectPath": "C:\\Users\\michael.nielsen\\source\\repos\\PrivacyLens\\PrivacyLens\\PrivacyLens\\PrivacyLens.csproj",
+        "packagesPath": "C:\\Users\\michael.nielsen\\.nuget\\packages\\",
+        "outputPath": "C:\\Users\\michael.nielsen\\source\\repos\\PrivacyLens\\PrivacyLens\\PrivacyLens\\obj\\",
+        "projectStyle": "PackageReference",
+        "fallbackFolders": [
+          "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"
+        ],
+        "configFilePaths": [
+          "C:\\Users\\michael.nielsen\\AppData\\Roaming\\NuGet\\NuGet.Config",
+          "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.FallbackLocation.config",
+          "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
+        ],
+        "originalTargetFrameworks": [
+          "net8.0"
+        ],
+        "sources": {
+          "C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\": {},
+          "https://api.nuget.org/v3/index.json": {}
+        },
+        "frameworks": {
+          "net8.0": {
+            "targetAlias": "net8.0",
+            "projectReferences": {}
+          }
+        },
+        "warningProperties": {
+          "warnAsError": [
+            "NU1605"
+          ]
+        },
+        "restoreAuditProperties": {
+          "enableAudit": "true",
+          "auditLevel": "low",
+          "auditMode": "direct"
+        },
+        "SdkAnalysisLevel": "9.0.300"
+      },
+      "frameworks": {
+        "net8.0": {
+          "targetAlias": "net8.0",
+          "dependencies": {
+            "Npgsql": {
+              "target": "Package",
+              "version": "[9.0.3, )"
+            },
+            "Pgvector": {
+              "target": "Package",
+              "version": "[0.3.2, )"
+            }
+          },
+          "imports": [
+            "net461",
+            "net462",
+            "net47",
+            "net471",
+            "net472",
+            "net48",
+            "net481"
+          ],
+          "assetTargetFallback": true,
+          "warn": true,
+          "frameworkReferences": {
+            "Microsoft.NETCore.App": {
+              "privateAssets": "all"
+            }
+          },
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\9.0.304/PortableRuntimeIdentifierGraph.json"
+        }
+      }
+    }
+  }
+}
+
+
+# ===== File: C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\obj\project.assets.json =====
+
+{
+  "version": 3,
+  "targets": {
+    "net8.0": {
+      "Microsoft.Extensions.DependencyInjection.Abstractions/8.0.2": {
+        "type": "package",
+        "compile": {
+          "lib/net8.0/Microsoft.Extensions.DependencyInjection.Abstractions.dll": {
+            "related": ".xml"
+          }
+        },
+        "runtime": {
+          "lib/net8.0/Microsoft.Extensions.DependencyInjection.Abstractions.dll": {
+            "related": ".xml"
+          }
+        },
+        "build": {
+          "buildTransitive/net6.0/_._": {}
+        }
+      },
+      "Microsoft.Extensions.Logging.Abstractions/8.0.2": {
+        "type": "package",
+        "dependencies": {
+          "Microsoft.Extensions.DependencyInjection.Abstractions": "8.0.2"
+        },
+        "compile": {
+          "lib/net8.0/Microsoft.Extensions.Logging.Abstractions.dll": {
+            "related": ".xml"
+          }
+        },
+        "runtime": {
+          "lib/net8.0/Microsoft.Extensions.Logging.Abstractions.dll": {
+            "related": ".xml"
+          }
+        },
+        "build": {
+          "buildTransitive/net6.0/Microsoft.Extensions.Logging.Abstractions.targets": {}
+        }
+      },
+      "Npgsql/9.0.3": {
+        "type": "package",
+        "dependencies": {
+          "Microsoft.Extensions.Logging.Abstractions": "8.0.2"
+        },
+        "compile": {
+          "lib/net8.0/Npgsql.dll": {
+            "related": ".xml"
+          }
+        },
+        "runtime": {
+          "lib/net8.0/Npgsql.dll": {
+            "related": ".xml"
+          }
+        }
+      },
+      "Pgvector/0.3.2": {
+        "type": "package",
+        "dependencies": {
+          "Npgsql": "8.0.5"
+        },
+        "compile": {
+          "lib/net6.0/Pgvector.dll": {}
+        },
+        "runtime": {
+          "lib/net6.0/Pgvector.dll": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "Microsoft.Extensions.DependencyInjection.Abstractions/8.0.2": {
+      "sha512": "3iE7UF7MQkCv1cxzCahz+Y/guQbTqieyxyaWKhrRO91itI9cOKO76OHeQDahqG4MmW5umr3CcCvGmK92lWNlbg==",
+      "type": "package",
+      "path": "microsoft.extensions.dependencyinjection.abstractions/8.0.2",
+      "files": [
+        ".nupkg.metadata",
+        ".signature.p7s",
+        "Icon.png",
+        "LICENSE.TXT",
+        "PACKAGE.md",
+        "THIRD-PARTY-NOTICES.TXT",
+        "buildTransitive/net461/Microsoft.Extensions.DependencyInjection.Abstractions.targets",
+        "buildTransitive/net462/_._",
+        "buildTransitive/net6.0/_._",
+        "buildTransitive/netcoreapp2.0/Microsoft.Extensions.DependencyInjection.Abstractions.targets",
+        "lib/net462/Microsoft.Extensions.DependencyInjection.Abstractions.dll",
+        "lib/net462/Microsoft.Extensions.DependencyInjection.Abstractions.xml",
+        "lib/net6.0/Microsoft.Extensions.DependencyInjection.Abstractions.dll",
+        "lib/net6.0/Microsoft.Extensions.DependencyInjection.Abstractions.xml",
+        "lib/net7.0/Microsoft.Extensions.DependencyInjection.Abstractions.dll",
+        "lib/net7.0/Microsoft.Extensions.DependencyInjection.Abstractions.xml",
+        "lib/net8.0/Microsoft.Extensions.DependencyInjection.Abstractions.dll",
+        "lib/net8.0/Microsoft.Extensions.DependencyInjection.Abstractions.xml",
+        "lib/netstandard2.0/Microsoft.Extensions.DependencyInjection.Abstractions.dll",
+        "lib/netstandard2.0/Microsoft.Extensions.DependencyInjection.Abstractions.xml",
+        "lib/netstandard2.1/Microsoft.Extensions.DependencyInjection.Abstractions.dll",
+        "lib/netstandard2.1/Microsoft.Extensions.DependencyInjection.Abstractions.xml",
+        "microsoft.extensions.dependencyinjection.abstractions.8.0.2.nupkg.sha512",
+        "microsoft.extensions.dependencyinjection.abstractions.nuspec",
+        "useSharedDesignerContext.txt"
+      ]
+    },
+    "Microsoft.Extensions.Logging.Abstractions/8.0.2": {
+      "sha512": "nroMDjS7hNBPtkZqVBbSiQaQjWRDxITI8Y7XnDs97rqG3EbzVTNLZQf7bIeUJcaHOV8bca47s1Uxq94+2oGdxA==",
+      "type": "package",
+      "path": "microsoft.extensions.logging.abstractions/8.0.2",
+      "files": [
+        ".nupkg.metadata",
+        ".signature.p7s",
+        "Icon.png",
+        "LICENSE.TXT",
+        "PACKAGE.md",
+        "THIRD-PARTY-NOTICES.TXT",
+        "analyzers/dotnet/roslyn3.11/cs/Microsoft.Extensions.Logging.Generators.dll",
+        "analyzers/dotnet/roslyn3.11/cs/cs/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn3.11/cs/de/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn3.11/cs/es/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn3.11/cs/fr/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn3.11/cs/it/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn3.11/cs/ja/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn3.11/cs/ko/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn3.11/cs/pl/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn3.11/cs/pt-BR/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn3.11/cs/ru/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn3.11/cs/tr/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn3.11/cs/zh-Hans/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn3.11/cs/zh-Hant/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn4.0/cs/Microsoft.Extensions.Logging.Generators.dll",
+        "analyzers/dotnet/roslyn4.0/cs/cs/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn4.0/cs/de/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn4.0/cs/es/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn4.0/cs/fr/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn4.0/cs/it/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn4.0/cs/ja/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn4.0/cs/ko/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn4.0/cs/pl/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn4.0/cs/pt-BR/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn4.0/cs/ru/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn4.0/cs/tr/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn4.0/cs/zh-Hans/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn4.0/cs/zh-Hant/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn4.4/cs/Microsoft.Extensions.Logging.Generators.dll",
+        "analyzers/dotnet/roslyn4.4/cs/cs/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn4.4/cs/de/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn4.4/cs/es/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn4.4/cs/fr/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn4.4/cs/it/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn4.4/cs/ja/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn4.4/cs/ko/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn4.4/cs/pl/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn4.4/cs/pt-BR/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn4.4/cs/ru/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn4.4/cs/tr/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn4.4/cs/zh-Hans/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "analyzers/dotnet/roslyn4.4/cs/zh-Hant/Microsoft.Extensions.Logging.Generators.resources.dll",
+        "buildTransitive/net461/Microsoft.Extensions.Logging.Abstractions.targets",
+        "buildTransitive/net462/Microsoft.Extensions.Logging.Abstractions.targets",
+        "buildTransitive/net6.0/Microsoft.Extensions.Logging.Abstractions.targets",
+        "buildTransitive/netcoreapp2.0/Microsoft.Extensions.Logging.Abstractions.targets",
+        "buildTransitive/netstandard2.0/Microsoft.Extensions.Logging.Abstractions.targets",
+        "lib/net462/Microsoft.Extensions.Logging.Abstractions.dll",
+        "lib/net462/Microsoft.Extensions.Logging.Abstractions.xml",
+        "lib/net6.0/Microsoft.Extensions.Logging.Abstractions.dll",
+        "lib/net6.0/Microsoft.Extensions.Logging.Abstractions.xml",
+        "lib/net7.0/Microsoft.Extensions.Logging.Abstractions.dll",
+        "lib/net7.0/Microsoft.Extensions.Logging.Abstractions.xml",
+        "lib/net8.0/Microsoft.Extensions.Logging.Abstractions.dll",
+        "lib/net8.0/Microsoft.Extensions.Logging.Abstractions.xml",
+        "lib/netstandard2.0/Microsoft.Extensions.Logging.Abstractions.dll",
+        "lib/netstandard2.0/Microsoft.Extensions.Logging.Abstractions.xml",
+        "microsoft.extensions.logging.abstractions.8.0.2.nupkg.sha512",
+        "microsoft.extensions.logging.abstractions.nuspec",
+        "useSharedDesignerContext.txt"
+      ]
+    },
+    "Npgsql/9.0.3": {
+      "sha512": "tPvY61CxOAWxNsKLEBg+oR646X4Bc8UmyQ/tJszL/7mEmIXQnnBhVJZrZEEUv0Bstu0mEsHZD5At3EO8zQRAYw==",
+      "type": "package",
+      "path": "npgsql/9.0.3",
+      "files": [
+        ".nupkg.metadata",
+        ".signature.p7s",
+        "README.md",
+        "lib/net6.0/Npgsql.dll",
+        "lib/net6.0/Npgsql.xml",
+        "lib/net8.0/Npgsql.dll",
+        "lib/net8.0/Npgsql.xml",
+        "npgsql.9.0.3.nupkg.sha512",
+        "npgsql.nuspec",
+        "postgresql.png"
+      ]
+    },
+    "Pgvector/0.3.2": {
+      "sha512": "n7M5LuNejHUmtWky3zCbNO+tP1Gnjiuv9Qtu4LyvB1602dD8RiBxxCQp9jEjM0ZFDxAZF1oOWkNIkXw46KT00Q==",
+      "type": "package",
+      "path": "pgvector/0.3.2",
+      "files": [
+        ".nupkg.metadata",
+        ".signature.p7s",
+        "LICENSE.txt",
+        "README.md",
+        "icon.png",
+        "lib/net462/Pgvector.dll",
+        "lib/net6.0/Pgvector.dll",
+        "lib/netstandard2.0/Pgvector.dll",
+        "pgvector.0.3.2.nupkg.sha512",
+        "pgvector.nuspec"
+      ]
+    }
+  },
+  "projectFileDependencyGroups": {
+    "net8.0": [
+      "Npgsql >= 9.0.3",
+      "Pgvector >= 0.3.2"
+    ]
+  },
+  "packageFolders": {
+    "C:\\Users\\michael.nielsen\\.nuget\\packages\\": {},
+    "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages": {}
+  },
+  "project": {
+    "version": "1.0.0",
+    "restore": {
+      "projectUniqueName": "C:\\Users\\michael.nielsen\\source\\repos\\PrivacyLens\\PrivacyLens\\PrivacyLens\\PrivacyLens.csproj",
+      "projectName": "PrivacyLens",
+      "projectPath": "C:\\Users\\michael.nielsen\\source\\repos\\PrivacyLens\\PrivacyLens\\PrivacyLens\\PrivacyLens.csproj",
+      "packagesPath": "C:\\Users\\michael.nielsen\\.nuget\\packages\\",
+      "outputPath": "C:\\Users\\michael.nielsen\\source\\repos\\PrivacyLens\\PrivacyLens\\PrivacyLens\\obj\\",
+      "projectStyle": "PackageReference",
+      "fallbackFolders": [
+        "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"
+      ],
+      "configFilePaths": [
+        "C:\\Users\\michael.nielsen\\AppData\\Roaming\\NuGet\\NuGet.Config",
+        "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.FallbackLocation.config",
+        "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
+      ],
+      "originalTargetFrameworks": [
+        "net8.0"
+      ],
+      "sources": {
+        "C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\": {},
+        "https://api.nuget.org/v3/index.json": {}
+      },
+      "frameworks": {
+        "net8.0": {
+          "targetAlias": "net8.0",
+          "projectReferences": {}
+        }
+      },
+      "warningProperties": {
+        "warnAsError": [
+          "NU1605"
+        ]
+      },
+      "restoreAuditProperties": {
+        "enableAudit": "true",
+        "auditLevel": "low",
+        "auditMode": "direct"
+      },
+      "SdkAnalysisLevel": "9.0.300"
+    },
+    "frameworks": {
+      "net8.0": {
+        "targetAlias": "net8.0",
+        "dependencies": {
+          "Npgsql": {
+            "target": "Package",
+            "version": "[9.0.3, )"
+          },
+          "Pgvector": {
+            "target": "Package",
+            "version": "[0.3.2, )"
+          }
+        },
+        "imports": [
+          "net461",
+          "net462",
+          "net47",
+          "net471",
+          "net472",
+          "net48",
+          "net481"
+        ],
+        "assetTargetFallback": true,
+        "warn": true,
+        "frameworkReferences": {
+          "Microsoft.NETCore.App": {
+            "privateAssets": "all"
+          }
+        },
+        "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\9.0.304/PortableRuntimeIdentifierGraph.json"
+      }
+    }
+  }
+}
+
+
+# ===== File: C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\obj\Debug\net8.0\.NETCoreApp,Version=v8.0.AssemblyAttributes.cs =====
+
+// <autogenerated />
+using System;
+using System.Reflection;
+[assembly: global::System.Runtime.Versioning.TargetFrameworkAttribute(".NETCoreApp,Version=v8.0", FrameworkDisplayName = ".NET 8.0")]
+
+
+
+# ===== File: C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\obj\Debug\net8.0\PrivacyLens.AssemblyInfo.cs =====
+
+//------------------------------------------------------------------------------
+// <auto-generated>
+//     This code was generated by a tool.
+//     Runtime Version:4.0.30319.42000
+//
+//     Changes to this file may cause incorrect behavior and will be lost if
+//     the code is regenerated.
+// </auto-generated>
+//------------------------------------------------------------------------------
+
+using System;
+using System.Reflection;
+
+[assembly: System.Reflection.AssemblyCompanyAttribute("PrivacyLens")]
+[assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
+[assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+c3dad9a535ac427f39837f6180b7f4a40370abf0")]
+[assembly: System.Reflection.AssemblyProductAttribute("PrivacyLens")]
+[assembly: System.Reflection.AssemblyTitleAttribute("PrivacyLens")]
+[assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
+
+// Generated by the MSBuild WriteCodeFragment class.
+
+
+
+
+# ===== File: C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\obj\Debug\net8.0\PrivacyLens.GlobalUsings.g.cs =====
+
+// <auto-generated/>
+global using global::System;
+global using global::System.Collections.Generic;
+global using global::System.IO;
+global using global::System.Linq;
+global using global::System.Net.Http;
+global using global::System.Threading;
+global using global::System.Threading.Tasks;
+
+
+
+# ===== File: C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\obj\Debug\net8.0\PrivacyLens.sourcelink.json =====
+
+{"documents":{"C:\\Users\\michael.nielsen\\source\\repos\\PrivacyLens\\*":"https://raw.githubusercontent.com/GrasslandsPublic/PrivacyLens/c3dad9a535ac427f39837f6180b7f4a40370abf0/*"}}
+
+
+# ===== File: C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\Services\ConfigurationService.cs =====
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text.Json;
+
+namespace PrivacyLens.Services
+{
+    public class ConfigurationService
+    {
+        private readonly string configPath;
+        private PrivacyLensConfig config;
+
+        public class PrivacyLensConfig
+        {
+            public PrivacyLensSettings PrivacyLens { get; set; }
+        }
+
+        public class PrivacyLensSettings
+        {
+            public List<string> DocumentCategories { get; set; } = new List<string>();
+            public List<string> DocumentStructures { get; set; } = new List<string>();
+            public List<string> ChunkingStrategies { get; set; } = new List<string>();
+            public List<string> SupportedFileTypes { get; set; } = new List<string>();
+            public PathSettings Paths { get; set; } = new PathSettings();
+        }
+
+        public class PathSettings
+        {
+            public string SourceDocuments { get; set; } = "governance\\Source Documents";
+            public string WebContent { get; set; } = "governance\\Web Content";
+            public string TempFiles { get; set; } = "governance\\temp";
+        }
+
+        public ConfigurationService()
+        {
+            configPath = Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json");
+            LoadConfiguration();
+        }
+
+        private void LoadConfiguration()
+        {
+            try
+            {
+                if (!File.Exists(configPath))
+                {
+                    // Create default configuration if it doesn't exist
+                    CreateDefaultConfiguration();
+                }
+
+                var json = File.ReadAllText(configPath);
+                config = JsonSerializer.Deserialize<PrivacyLensConfig>(json);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error loading configuration: {ex.Message}");
+                Console.WriteLine("Using default configuration...");
+                config = GetDefaultConfig();
+            }
+        }
+
+        private void CreateDefaultConfiguration()
+        {
+            var defaultConfig = GetDefaultConfig();
+            var options = new JsonSerializerOptions { WriteIndented = true };
+            var json = JsonSerializer.Serialize(defaultConfig, options);
+            File.WriteAllText(configPath, json);
+            Console.WriteLine($"Created default configuration at: {configPath}");
+        }
+
+        private PrivacyLensConfig GetDefaultConfig()
+        {
+            return new PrivacyLensConfig
+            {
+                PrivacyLens = new PrivacyLensSettings
+                {
+                    DocumentCategories = new List<string>
+                    {
+                        "Policy & Legal",
+                        "Operational",
+                        "Administrative",
+                        "Forms & Templates",
+                        "Reports",
+                        "Communications",
+                        "Financial",
+                        "Technical",
+                        "Web Content",
+                        "Other"
+                    },
+                    DocumentStructures = new List<string>
+                    {
+                        "Hierarchical",
+                        "Tabular",
+                        "Linear",
+                        "Mixed",
+                        "List-Based"
+                    },
+                    ChunkingStrategies = new List<string>
+                    {
+                        "Recursive",
+                        "Structure-Aware",
+                        "Table-Aware",
+                        "Section-Based",
+                        "Form-Preserving"
+                    },
+                    SupportedFileTypes = new List<string>
+                    {
+                        ".pdf", ".docx", ".doc", ".txt",
+                        ".html", ".htm", ".csv", ".xlsx", ".xls"
+                    }
+                }
+            };
+        }
+
+        public List<string> GetDocumentCategories() => config?.PrivacyLens?.DocumentCategories ?? new List<string>();
+        public List<string> GetDocumentStructures() => config?.PrivacyLens?.DocumentStructures ?? new List<string>();
+        public List<string> GetChunkingStrategies() => config?.PrivacyLens?.ChunkingStrategies ?? new List<string>();
+        public List<string> GetSupportedFileTypes() => config?.PrivacyLens?.SupportedFileTypes ?? new List<string>();
+        public PathSettings GetPaths() => config?.PrivacyLens?.Paths ?? new PathSettings();
+
+        public void ReloadConfiguration()
+        {
+            LoadConfiguration();
+            Console.WriteLine("Configuration reloaded.");
+        }
+    }
+}
+
+
+
+# ===== File: C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\Services\DatabaseBootstrapService.cs =====
+
+using System;
+using System.IO;
+using System.Text.Json;
+using System.Threading.Tasks;
+using Npgsql;
+using Pgvector;
+
+namespace PrivacyLens.Services
+{
+    /// <summary>
+    /// Idempotent DB initializer:
+    ///  • Ensures pgvector extension is enabled
+    ///  • Creates 'chunks' table (VECTOR(1536)) for text-embedding-3-small
+    ///  • Adds HNSW ANN index (cosine) and optional full-text (GIN) index
+    /// </summary>
+    public static class DatabaseBootstrapService
+    {
+        public static async Task InitializeAsync()
+        {
+            var appConnString = GetAppConnectionString();
+            if (string.IsNullOrWhiteSpace(appConnString))
+            {
+                Console.WriteLine("? ConnectionStrings:PostgresApp missing in appsettings.json");
+                return;
+            }
+
+            var dsb = new NpgsqlDataSourceBuilder(appConnString);
+            dsb.UseVector(); // enable pgvector type mapping
+            await using var dataSource = dsb.Build();
+
+            await using var conn = await dataSource.OpenConnectionAsync();
+
+            Console.WriteLine("??  Checking/Enabling pgvector extension...");
+            await using (var cmd = new NpgsqlCommand("CREATE EXTENSION IF NOT EXISTS vector;", conn))
+                await cmd.ExecuteNonQueryAsync();
+
+            // Make sure this connection knows about the 'vector' type immediately
+            await conn.ReloadTypesAsync();
+
+            Console.WriteLine("??  Creating tables & indexes if missing...");
+            var ddl = @"
+CREATE TABLE IF NOT EXISTS chunks (
+  id             BIGSERIAL PRIMARY KEY,
+  app_id         TEXT,                -- NULL => governance
+  title          TEXT,
+  url            TEXT,
+  section_path   TEXT,
+  page           INT,
+  text           TEXT NOT NULL,
+  embedding      VECTOR(1536) NOT NULL,   -- text-embedding-3-small
+  jurisdiction   TEXT,
+  risk_level     TEXT,
+  effective_date DATE,
+  created_at     TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS chunks_app_id_idx ON chunks(app_id);
+
+-- ANN (HNSW) for cosine distance (common for text embeddings)
+CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw
+  ON chunks USING hnsw (embedding vector_cosine_ops)
+  WITH (m = 16, ef_construction = 64);
+
+-- Optional: full-text search (hybrid with vector)
+ALTER TABLE chunks
+  ADD COLUMN IF NOT EXISTS tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', coalesce(text,''))) STORED;
+
+CREATE INDEX IF NOT EXISTS chunks_tsv_gin ON chunks USING GIN (tsv);
+";
+            await using (var cmd = new NpgsqlCommand(ddl, conn))
+                await cmd.ExecuteNonQueryAsync();
+
+            Console.WriteLine("?? Smoke test (cosine distance)...");
+            await using (var test = new NpgsqlCommand(
+                "SELECT '[-1,0,1]'::vector <=> '[-1,0,2]'::vector AS distance;", conn))
+            {
+                var result = await test.ExecuteScalarAsync();
+                Console.WriteLine($"? vector extension OK; example cosine distance = {result}");
+            }
+
+            Console.WriteLine("? Initialize Database complete.");
+        }
+
+        private static string GetAppConnectionString()
+        {
+            try
+            {
+                // Try the current working directory (bin\Debug\net8.0\appsettings.json)
+                var cwd = Directory.GetCurrentDirectory();
+                var path = Path.Combine(cwd, "appsettings.json");
+
+                // If not found, try the process base directory
+                if (!File.Exists(path))
+                    path = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
+
+                if (!File.Exists(path))
+                    return string.Empty;
+
+                var json = File.ReadAllText(path);
+                using var doc = JsonDocument.Parse(json);
+
+                if (doc.RootElement.TryGetProperty("ConnectionStrings", out var cs) &&
+                    cs.TryGetProperty("PostgresApp", out var val))
+                {
+                    return val.GetString() ?? string.Empty;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"? Failed to read appsettings.json: {ex.Message}");
+            }
+            return string.Empty;
+        }
+    }
+}
+
+
+
+# ===== File: C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\Services\DocumentClassifierService.cs =====
+
+using System;
+using System.IO;
+using System.Security.Cryptography;
+using PrivacyLens.Models;
+
+namespace PrivacyLens.Services
+{
+    /// <summary>
+    /// Simple document classifier - basic automatic classification
+    /// Most classification will be done interactively
+    /// </summary>
+    public class DocumentClassifierService
+    {
+        public DocumentInfo ClassifyDocument(DocumentInfo document)
+        {
+            // Calculate document hash for integrity tracking
+            if (File.Exists(document.FilePath))
+            {
+                document.DocumentHash = CalculateFileHash(document.FilePath);
+            }
+
+            // Basic filename-based classification
+            var fileNameLower = document.FileName.ToLower();
+
+            // Simple keyword matching for category
+            if (fileNameLower.Contains("policy") || fileNameLower.Contains("act") || fileNameLower.Contains("regulation"))
+            {
+                document.Category = DocumentCategory.PolicyLegal;
+                document.RequiresStructurePreservation = true;
+            }
+            else if (fileNameLower.Contains("report"))
+            {
+                document.Category = DocumentCategory.Report;
+            }
+            else if (fileNameLower.Contains("form") || fileNameLower.Contains("template"))
+            {
+                document.Category = DocumentCategory.Form;
+            }
+            else if (fileNameLower.Contains("manual") || fileNameLower.Contains("guide"))
+            {
+                document.Category = DocumentCategory.Operational;
+            }
+            else if (fileNameLower.Contains("notice") || fileNameLower.Contains("fact") || fileNameLower.Contains("sheet"))
+            {
+                document.Category = DocumentCategory.Correspondence;
+            }
+            else
+            {
+                document.Category = DocumentCategory.Unknown;
+            }
+
+            // Set basic defaults for structure and sensitivity
+            document.Structure = DocumentStructure.Unknown;
+            document.Sensitivity = ContentSensitivity.Unknown;
+
+            // Set metadata for chunking strategy
+            document.AdditionalMetadata["ChunkingStrategy"] = document.GetRecommendedChunkingStrategy();
+            document.AdditionalMetadata["RequiresManualReview"] = "False";
+
+            return document;
+        }
+
+        private string CalculateFileHash(string filePath)
+        {
+            try
+            {
+                using (var sha256 = SHA256.Create())
+                using (var stream = File.OpenRead(filePath))
+                {
+                    var hash = sha256.ComputeHash(stream);
+                    return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"    Warning: Could not calculate hash: {ex.Message}");
+                return string.Empty;
+            }
+        }
+    }
+}
+
+
+# ===== File: C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\Services\DocumentDiscoveryService.cs =====
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text.Json;
+using PrivacyLens.Models;
+
+namespace PrivacyLens.Services
+{
+    public class DocumentDiscoveryService
+    {
+        private readonly string sourceDirectory;
+        private readonly string manifestPath;
+        private readonly DocumentClassifierService classifier;
+        private readonly ConfigurationService configService;
+        private readonly SimpleInteractiveClassifier interactiveClassifier;
+
+        // Supported file extensions - now loaded from config
+        private readonly string[] supportedExtensions;
+
+        public DocumentDiscoveryService()
+        {
+            // Initialize services
+            classifier = new DocumentClassifierService();
+            configService = new ConfigurationService();
+            interactiveClassifier = new SimpleInteractiveClassifier();
+
+            // Set up paths from config
+            var paths = configService.GetPaths();
+            string governanceDir = Path.Combine(Directory.GetCurrentDirectory(), "governance");
+            sourceDirectory = Path.Combine(governanceDir, "Source Documents");
+            manifestPath = Path.Combine(governanceDir, "temp", "manifest.json");
+
+            // Load supported extensions from config
+            supportedExtensions = configService.GetSupportedFileTypes().ToArray();
+
+            // Ensure directories exist
+            Directory.CreateDirectory(sourceDirectory);
+            Directory.CreateDirectory(Path.GetDirectoryName(manifestPath)!);
+        }
+
+        public DocumentManifest DiscoverDocuments(bool useInteractiveMode = false)
+        {
+            Console.WriteLine($"Scanning directory: {sourceDirectory}");
+
+            if (useInteractiveMode)
+            {
+                Console.WriteLine($"Starting INTERACTIVE document discovery...\n");
+            }
+            else
+            {
+                Console.WriteLine($"Starting AUTOMATIC document discovery with classification...\n");
+            }
+
+            var manifest = new DocumentManifest
+            {
+                CreatedAt = DateTime.Now,
+                SourceDirectory = sourceDirectory
+            };
+
+            // Check if directory exists
+            if (!Directory.Exists(sourceDirectory))
+            {
+                Console.WriteLine("Source directory not found. Creating it...");
+                Directory.CreateDirectory(sourceDirectory);
+                return manifest;
+            }
+
+            // Find all supported files
+            var files = Directory.GetFiles(sourceDirectory, "*.*", SearchOption.AllDirectories)
+                .Where(file => supportedExtensions.Any(ext =>
+                    file.EndsWith(ext, StringComparison.OrdinalIgnoreCase)))
+                .ToList();
+
+            if (files.Count == 0)
+            {
+                Console.WriteLine("No supported documents found.");
+                Console.WriteLine($"Supported types: {string.Join(", ", supportedExtensions)}");
+                return manifest;
+            }
+
+            Console.WriteLine($"Found {files.Count} files to process\n");
+
+            // Process each file
+            int processedCount = 0;
+            foreach (var file in files)
+            {
+                processedCount++;
+
+                var fileInfo = new FileInfo(file);
+                var docInfo = new DocumentInfo
+                {
+                    FileName = fileInfo.Name,
+                    FilePath = fileInfo.FullName,
+                    FileSizeBytes = fileInfo.Length,
+                    LastModified = fileInfo.LastWriteTime,
+                    FileType = fileInfo.Extension.ToLower(),
+                    DiscoveredAt = DateTime.Now
+                };
+
+                if (useInteractiveMode)
+                {
+                    // Interactive classification using config categories
+                    interactiveClassifier.ClassifyDocument(docInfo, processedCount, files.Count);
+
+                    // Ask to continue for large batches
+                    if (files.Count > 5 && processedCount % 5 == 0 && processedCount < files.Count)
+                    {
+                        if (!interactiveClassifier.AskToContinue(files.Count - processedCount))
+                        {
+                            Console.WriteLine("Auto-classifying remaining documents...");
+                            useInteractiveMode = false; // Switch to auto for remaining
+                        }
+                    }
+                }
+                else
+                {
+                    // Automatic classification
+                    Console.WriteLine($"[{processedCount}/{files.Count}] Processing: {Path.GetFileName(file)}");
+
+                    docInfo = classifier.ClassifyDocument(docInfo);
+
+                    // Display classification results
+                    Console.WriteLine($"    Category: {docInfo.Category}");
+                    Console.WriteLine($"    Structure: {docInfo.Structure}");
+                    Console.WriteLine($"    Sensitivity: {docInfo.Sensitivity}");
+                    Console.WriteLine($"    Recommended Strategy: {docInfo.GetRecommendedChunkingStrategy()}");
+
+                    if (docInfo.LikelyContainsPersonalInfo)
+                    {
+                        Console.WriteLine("    ??  Likely contains personal information - requires review");
+                    }
+
+                    Console.WriteLine();
+                }
+
+                manifest.Documents.Add(docInfo);
+            }
+
+            // Update manifest statistics
+            manifest.UpdateStatistics();
+
+            return manifest;
+        }
+
+        public void SaveManifest(DocumentManifest manifest)
+        {
+            try
+            {
+                var options = new JsonSerializerOptions
+                {
+                    WriteIndented = true,
+                    Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() }
+                };
+
+                var json = JsonSerializer.Serialize(manifest, options);
+                File.WriteAllText(manifestPath, json);
+                Console.WriteLine($"Enhanced manifest saved to: {manifestPath}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error saving manifest: {ex.Message}");
+            }
+        }
+
+        public DocumentManifest? LoadManifest()
+        {
+            try
+            {
+                if (File.Exists(manifestPath))
+                {
+                    var json = File.ReadAllText(manifestPath);
+                    var options = new JsonSerializerOptions
+                    {
+                        Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() }
+                    };
+                    return JsonSerializer.Deserialize<DocumentManifest>(json, options);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error loading manifest: {ex.Message}");
+            }
+            return null;
+        }
+
+        public void DisplayResults(DocumentManifest manifest)
+        {
+            Console.WriteLine("\n========================================");
+            Console.WriteLine("     Enhanced Discovery Results         ");
+            Console.WriteLine("========================================");
+            Console.WriteLine($"Total documents found: {manifest.TotalDocuments}");
+            Console.WriteLine($"Total size: {FormatFileSize(manifest.TotalSizeBytes)}");
+            Console.WriteLine($"Documents requiring special handling: {manifest.DocumentsRequiringSpecialHandling}");
+            Console.WriteLine($"Source directory: {manifest.SourceDirectory}");
+            Console.WriteLine();
+
+            // Display classification breakdown
+            if (manifest.CategoryCounts.Any())
+            {
+                Console.WriteLine("Document Categories:");
+                Console.WriteLine("-------------------");
+                foreach (var category in manifest.CategoryCounts.OrderByDescending(c => c.Value))
+                {
+                    Console.WriteLine($"  {category.Key}: {category.Value} documents");
+                }
+                Console.WriteLine();
+            }
+
+            if (manifest.StructureCounts.Any())
+            {
+                Console.WriteLine("Document Structures:");
+                Console.WriteLine("-------------------");
+                foreach (var structure in manifest.StructureCounts.OrderByDescending(s => s.Value))
+                {
+                    Console.WriteLine($"  {structure.Key}: {structure.Value} documents");
+                }
+                Console.WriteLine();
+            }
+
+            if (manifest.SensitivityCounts.Any())
+            {
+                Console.WriteLine("Content Sensitivity:");
+                Console.WriteLine("-------------------");
+                foreach (var sensitivity in manifest.SensitivityCounts.OrderByDescending(s => s.Value))
+                {
+                    var indicator = sensitivity.Key == ContentSensitivity.Personal ? " ??" : "";
+                    Console.WriteLine($"  {sensitivity.Key}: {sensitivity.Value} documents{indicator}");
+                }
+                Console.WriteLine();
+            }
+
+            // Display chunking strategy recommendations
+            var strategyGroups = manifest.Documents
+                .GroupBy(d => d.GetRecommendedChunkingStrategy())
+                .OrderByDescending(g => g.Count());
+
+            Console.WriteLine("Recommended Chunking Strategies:");
+            Console.WriteLine("--------------------------------");
+            foreach (var strategy in strategyGroups)
+            {
+                Console.WriteLine($"  {strategy.Key}: {strategy.Count()} documents");
+            }
+            Console.WriteLine();
+
+            // Display sample documents by type
+            if (manifest.Documents.Any())
+            {
+                Console.WriteLine("Sample Documents by Category:");
+                Console.WriteLine("-----------------------------");
+
+                var grouped = manifest.Documents.GroupBy(d => d.Category);
+                foreach (var group in grouped)
+                {
+                    Console.WriteLine($"\n{group.Key} ({group.Count()} files):");
+                    foreach (var doc in group.Take(3))
+                    {
+                        Console.WriteLine($"  - {doc.FileName}");
+                        Console.WriteLine($"    Size: {doc.FileSizeFormatted} | Structure: {doc.Structure} | Strategy: {doc.GetRecommendedChunkingStrategy()}");
+                    }
+                    if (group.Count() > 3)
+                    {
+                        Console.WriteLine($"  ... and {group.Count() - 3} more");
+                    }
+                }
+            }
+            else
+            {
+                Console.WriteLine("No documents found.");
+                Console.WriteLine($"Please add supported files to:");
+                Console.WriteLine(sourceDirectory);
+                Console.WriteLine("\nSupported formats:");
+                Console.WriteLine($"  {string.Join(", ", supportedExtensions)}");
+            }
+        }
+
+        private string FormatFileSize(long bytes)
+        {
+            string[] sizes = { "B", "KB", "MB", "GB" };
+            int order = 0;
+            double size = bytes;
+
+            while (size >= 1024 && order < sizes.Length - 1)
+            {
+                order++;
+                size /= 1024;
+            }
+
+            return $"{size:0.##} {sizes[order]}";
+        }
+    }
+}
+
+
+# ===== File: C:\Users\michael.nielsen\source\repos\PrivacyLens\PrivacyLens\PrivacyLens\Services\SimpleInteractiveClassifier.cs =====
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using PrivacyLens.Models;
+
+namespace PrivacyLens.Services
+{
+    public class SimpleInteractiveClassifier
+    {
+        private readonly ConfigurationService configService;
+        private readonly List<string> categories;
+        private readonly List<string> structures;
+        private readonly List<string> strategies;
+
+        public SimpleInteractiveClassifier()
+        {
+            configService = new ConfigurationService();
+            categories = configService.GetDocumentCategories();
+            structures = configService.GetDocumentStructures();
+            strategies = configService.GetChunkingStrategies();
+        }
+
+        public void ClassifyDocument(DocumentInfo document, int current, int total)
+        {
+            Console.Clear();
+            Console.WriteLine("========================================");
+            Console.WriteLine($"  DOCUMENT CLASSIFICATION [{current}/{total}]");
+            Console.WriteLine("========================================");
+            Console.WriteLine();
+            Console.WriteLine($"File: {document.FileName}");
+            Console.WriteLine($"Size: {document.FileSizeFormatted}");
+            Console.WriteLine($"Type: {document.FileType.ToUpper()}");
+            Console.WriteLine();
+
+            // Category selection
+            string selectedCategory = SelectFromList("DOCUMENT CATEGORY", categories, GetSuggestedCategory(document.FileName));
+            // Map string category to enum
+            document.Category = MapStringToCategory(selectedCategory);
+
+            // Structure selection - suggestion based on selected category
+            string suggestedStructure = GetSuggestedStructure(selectedCategory);
+            string selectedStructure = SelectFromList("DOCUMENT STRUCTURE", structures, suggestedStructure);
+            // Map string structure to enum
+            document.Structure = MapStringToStructure(selectedStructure);
+
+            // Chunking strategy selection
+            string strategy = SelectFromList("CHUNKING STRATEGY", strategies, GetSuggestedStrategy(selectedCategory));
+            document.AdditionalMetadata["ChunkingStrategy"] = strategy;
+
+            // Quick flags
+            Console.WriteLine();
+            Console.WriteLine("----------------------------------------");
+            Console.WriteLine("QUICK FLAGS (Y/N or Enter to skip):");
+            Console.WriteLine("----------------------------------------");
+
+            Console.Write("  Contains tables? ");
+            var tablesInput = Console.ReadLine()?.ToUpper();
+            if (tablesInput == "Y") document.LikelyContainsTables = true;
+            else if (tablesInput == "N") document.LikelyContainsTables = false;
+
+            Console.Write("  Requires structure preservation? ");
+            var preserveInput = Console.ReadLine()?.ToUpper();
+            if (preserveInput == "Y") document.RequiresStructurePreservation = true;
+            else if (preserveInput == "N") document.RequiresStructurePreservation = false;
+
+            // Add notes
+            Console.Write("\n  Add notes (optional): ");
+            var notes = Console.ReadLine();
+            if (!string.IsNullOrWhiteSpace(notes))
+            {
+                document.AdditionalMetadata["Notes"] = notes;
+            }
+
+            Console.WriteLine("\n[?] Classification complete!");
+            System.Threading.Thread.Sleep(1000);
+        }
+
+        private string SelectFromList(string title, List<string> options, string suggestion = null)
+        {
+            Console.WriteLine("----------------------------------------");
+            Console.WriteLine($"{title}:");
+            Console.WriteLine("----------------------------------------");
+
+            // Add hints for document structures
+            if (title == "DOCUMENT STRUCTURE")
+            {
+                Console.WriteLine("\nStructure Types:");
+                Console.WriteLine("  Hierarchical - Has clear sections, chapters, parts (e.g., Acts, policies)");
+                Console.WriteLine("  Tabular      - Mainly tables and data (e.g., financial reports, data sheets)");
+                Console.WriteLine("  Linear       - Simple sequential text, no special structure");
+                Console.WriteLine("  Mixed        - Combination of text, tables, and sections");
+                Console.WriteLine("  List-Based   - Primarily bullet points or numbered lists");
+                Console.WriteLine();
+            }
+            // Add hints for chunking strategies
+            else if (title == "CHUNKING STRATEGY")
+            {
+                Console.WriteLine("\nStrategy Types:");
+                Console.WriteLine("  Recursive       - General purpose, works for most documents");
+                Console.WriteLine("  Structure-Aware - Preserves document hierarchy (best for legal/policy)");
+                Console.WriteLine("  Table-Aware     - Special handling for tables and data");
+                Console.WriteLine("  Section-Based   - Chunks by document sections");
+                Console.WriteLine("  Form-Preserving - Maintains form structure and fields");
+                Console.WriteLine();
+            }
+
+            // Display options
+            for (int i = 0; i < options.Count; i++)
+            {
+                var marker = (suggestion != null && options[i] == suggestion) ? " <-- suggested" : "";
+                Console.WriteLine($"  {i + 1,2}. {options[i]}{marker}");
+            }
+
+            // Get selection
+            while (true)
+            {
+                Console.Write($"\nSelect (1-{options.Count}");
+                if (suggestion != null)
+                {
+                    Console.Write(", or Enter for suggested");
+                }
+                Console.Write("): ");
+
+                var input = Console.ReadLine();
+
+                // Handle Enter for suggestion
+                if (string.IsNullOrEmpty(input) && suggestion != null)
+                {
+                    return suggestion;
+                }
+
+                // Handle numeric selection
+                if (int.TryParse(input, out int choice) && choice >= 1 && choice <= options.Count)
+                {
+                    return options[choice - 1];
+                }
+
+                Console.WriteLine("Invalid selection. Please try again.");
+            }
+        }
+
+        private DocumentCategory MapStringToCategory(string category)
+        {
+            return category switch
+            {
+                "Policy & Legal" => DocumentCategory.PolicyLegal,
+                "Operational" => DocumentCategory.Operational,
+                "Administrative" => DocumentCategory.Form, // Map to closest enum
+                "Forms & Templates" => DocumentCategory.Form,
+                "Reports" => DocumentCategory.Report,
+                "Communications" => DocumentCategory.Correspondence,
+                "Financial" => DocumentCategory.Report, // Map to closest enum
+                "Technical" => DocumentCategory.Technical,
+                "Web Content" => DocumentCategory.Web,
+                _ => DocumentCategory.Unknown
+            };
+        }
+
+        private DocumentStructure MapStringToStructure(string structure)
+        {
+            return structure switch
+            {
+                "Hierarchical" => DocumentStructure.Hierarchical,
+                "Tabular" => DocumentStructure.Tabular,
+                "Linear" => DocumentStructure.Linear,
+                "Mixed" => DocumentStructure.Mixed,
+                "List-Based" => DocumentStructure.Linear, // Map to closest enum
+                _ => DocumentStructure.Unknown
+            };
+        }
+
+        private string GetSuggestedCategory(string fileName)
+        {
+            var lower = fileName.ToLower();
+
+            if (lower.Contains("policy") || lower.Contains("act") || lower.Contains("regulation"))
+                return "Policy & Legal";
+            if (lower.Contains("report") || lower.Contains("analysis"))
+                return "Reports";
+            if (lower.Contains("form") || lower.Contains("template"))
+                return "Forms & Templates";
+            if (lower.Contains("manual") || lower.Contains("guide"))
+                return "Operational";
+            if (lower.Contains("notice") || lower.Contains("fact sheet"))
+                return "Communications";
+
+            return categories.FirstOrDefault() ?? "Other";
+        }
+
+        private string GetSuggestedStructure(string category)
+        {
+            return category switch
+            {
+                "Policy & Legal" => "Hierarchical",      // Legal docs have sections/articles
+                "Forms & Templates" => "Mixed",          // Forms have fields and instructions
+                "Reports" => "Mixed",                    // Reports often have text and tables
+                "Financial" => "Tabular",                // Financial docs are table-heavy
+                "Communications" => "Linear",            // Letters/notices are usually linear
+                "Operational" => "Hierarchical",         // Manuals have chapters/sections
+                "Administrative" => "Linear",            // Admin docs are often simple text
+                "Technical" => "Hierarchical",           // Tech docs have sections
+                "Web Content" => "Linear",               // Web pages vary but often linear
+                _ => "Linear"                           // Default to linear
+            };
+        }
+
+        private string GetSuggestedStrategy(string category)
+        {
+            return category switch
+            {
+                "Policy & Legal" => "Structure-Aware",
+                "Forms & Templates" => "Form-Preserving",
+                "Reports" => "Table-Aware",
+                "Financial" => "Table-Aware",
+                _ => "Recursive"
+            };
+        }
+
+        public bool AskToContinue(int remaining)
+        {
+            Console.WriteLine($"\n{remaining} documents remaining.");
+            Console.WriteLine("\nOptions:");
+            Console.WriteLine("  [C]ontinue with interactive classification");
+            Console.WriteLine("  [A]uto-classify remaining (use automatic mode)");
+            Console.WriteLine("  [S]kip remaining documents");
+            Console.Write("\nYour choice (C/A/S): ");
+
+            var choice = Console.ReadLine()?.ToUpper();
+
+            if (choice == "S")
+            {
+                return false; // Stop processing
+            }
+            else if (choice == "A")
+            {
+                return false; // Switch to auto mode
+            }
+
+            return true; // Continue interactive
+        }
+    }
+}
