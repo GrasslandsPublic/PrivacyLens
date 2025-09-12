@@ -1,79 +1,46 @@
-﻿using System;
+﻿// Menus/MainMenu.cs (relevant excerpt)
+using PrivacyLens.Menus;
 
-namespace PrivacyLens.Menus
+public sealed class MainMenu
 {
-    public class MainMenu
+    private readonly GovernanceMenu _governanceMenu = new();
+
+    public void Show()
     {
-        private readonly GovernanceMenu governanceMenu = new GovernanceMenu();
-        private readonly SettingsMenu settingsMenu = new SettingsMenu();   // <-- add this
-
-        public void Show()
+        while (true)
         {
-            bool exit = false;
-            while (!exit)
+            Console.Clear();
+            Console.WriteLine("========================================");
+            Console.WriteLine(" PrivacyLens Assessment System");
+            Console.WriteLine("========================================");
+            Console.WriteLine();
+            Console.WriteLine("1. Manage Governance Database");
+            Console.WriteLine("2. Create New Assessment");
+            Console.WriteLine("3. View Existing Assessments");
+            Console.WriteLine("4. Scrape Application Website");
+            Console.WriteLine("5. Generate Reports");
+            Console.WriteLine("6. Settings");
+            Console.WriteLine("7. Exit");
+            Console.WriteLine();
+            Console.Write("Select an option (1-7): ");
+            var choice = Console.ReadLine()?.Trim();
+
+            switch (choice)
             {
-                Console.Clear();
-                Console.WriteLine("========================================");
-                Console.WriteLine(" PrivacyLens Assessment System ");
-                Console.WriteLine("========================================");
-                Console.WriteLine();
-                Console.WriteLine("1. Manage Governance Database");
-                Console.WriteLine("2. Create New Assessment");
-                Console.WriteLine("3. View Existing Assessments");
-                Console.WriteLine("4. Scrape Application Website");
-                Console.WriteLine("5. Generate Reports");
-                Console.WriteLine("6. Settings");
-                Console.WriteLine("7. Exit");
-                Console.WriteLine();
-                Console.Write("Select an option (1-7): ");
-                string? choice = Console.ReadLine();
+                case "1":
+                    Console.Clear();              // <<< clear before showing the sub-menu
+                    _governanceMenu.Show();       // blocks until user selects 0 in sub-menu
+                    // Optional: clear on return, so main menu is fresh
+                    Console.Clear();
+                    break;
 
-                switch (choice)
-                {
-                    case "1":
-                        governanceMenu.Show();
-                        break;
+                case "7":
+                    return;
 
-                    case "2":
-                        Console.WriteLine("\nCreate New Assessment (coming soon)");
-                        Console.WriteLine("Press any key to continue...");
-                        Console.ReadKey();
-                        break;
-
-                    case "3":
-                        Console.WriteLine("\nView Assessments (coming soon)");
-                        Console.WriteLine("Press any key to continue...");
-                        Console.ReadKey();
-                        break;
-
-                    case "4":
-                        Console.WriteLine("\nScrape Website (coming soon)");
-                        Console.WriteLine("Press any key to continue...");
-                        Console.ReadKey();
-                        break;
-
-                    case "5":
-                        Console.WriteLine("\nGenerate Reports (coming soon)");
-                        Console.WriteLine("Press any key to continue...");
-                        Console.ReadKey();
-                        break;
-
-                    case "6":
-                        settingsMenu.Show();  // <-- opens Settings submenu
-                        break;
-
-                    case "7":
-                        exit = true;
-                        Console.WriteLine("\nGoodbye!");
-                        break;
-
-                    default:
-                        Console.WriteLine("\nInvalid option. Press any key to continue...");
-                        Console.ReadKey();
-                        break;
-                }
+                default:
+                    // handle others...
+                    break;
             }
         }
     }
 }
-
