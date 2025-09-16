@@ -1,4 +1,4 @@
-﻿// Services/WebScraperService.cs - Enhanced with reliable download handling
+﻿// Services/WebScraperService.cs - Enhanced with content filtering
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -8,14 +8,15 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using PuppeteerSharp;
 
 namespace PrivacyLens.Services
 {
     /// <summary>
-    /// Production-grade web scraper with reliable document download capabilities.
-    /// Implements CDP configuration, proper synchronization, and robust error handling.
+    /// Production-grade web scraper with intelligent content filtering.
+    /// Only saves meaningful content, skips navigation/menu pages.
     /// </summary>
     public class WebScraperService : IDisposable
     {
@@ -26,7 +27,12 @@ namespace PrivacyLens.Services
         private readonly HashSet<string> allowedDomains;
         private readonly object downloadLock = new object();
 
-        // Document MIME types for detection - excludes JSON and other non-document types
+        // Content filtering thresholds
+        private const int MinimumContentLength = 1000; // ~200 words
+        private const int MinimumWordCount = 100;
+        private const double MaxLinkToWordRatio = 0.1; // Max 10% links to words
+
+        // Document MIME types for detection
         private static readonly HashSet<string> DocumentMimeTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "application/pdf",
@@ -41,7 +47,6 @@ namespace PrivacyLens.Services
             "application/rtf",
             "application/zip",
             "application/x-zip-compressed"
-            // Removed "application/octet-stream" - too generic, causes false positives
         };
 
         // File extensions for DOM scanning
@@ -62,6 +67,7 @@ namespace PrivacyLens.Services
             public string SessionId { get; set; } = string.Empty;
             public string EvidencePath { get; set; } = string.Empty;
             public int PagesScraped { get; set; }
+            public int PagesSkipped { get; set; }
             public int DocumentsDownloaded { get; set; }
             public int Failed { get; set; }
             public DateTime StartTime { get; set; }
@@ -79,7 +85,7 @@ namespace PrivacyLens.Services
         }
 
         /// <summary>
-        /// Main scraping method with enhanced download handling
+        /// Main scraping method with enhanced content filtering
         /// </summary>
         public async Task<ScrapeResult> ScrapeWebsiteAsync(
             string url,
@@ -102,9 +108,10 @@ namespace PrivacyLens.Services
 
             Console.WriteLine($"\n🚀 Starting {target} scrape");
             Console.WriteLine($"📍 URL: {url}");
-            Console.WriteLine($"🔖 Session: {result.SessionId}");
-            Console.WriteLine($"⚙️  Mode: {(antiDetection ? "Stealth" : "Fast")}");
-            Console.WriteLine($"📊 Max pages: {maxPages}\n");
+            Console.WriteLine($"📁 Session: {result.SessionId}");
+            Console.WriteLine($"🎯 Mode: {(antiDetection ? "Stealth" : "Fast")}");
+            Console.WriteLine($"📄 Max pages: {maxPages}");
+            Console.WriteLine($"🔍 Content filtering: ENABLED\n");
 
             try
             {
@@ -121,18 +128,69 @@ namespace PrivacyLens.Services
                 var page = await browser!.NewPageAsync();
                 await page.SetViewportAsync(new ViewPortOptions { Width = 1920, Height = 1080 });
 
-                // Configure CDP for downloads BEFORE any navigation
+                // Configure CDP for downloads
                 var downloadsPath = Path.Combine(evidencePath, "documents");
                 await ConfigureCDPDownloadBehavior(page, downloadsPath);
 
-                // Set up network interception
-                await SetupNetworkInterceptionAsync(page, evidencePath);
+                // Set up network interception (this tracks documents automatically)
+                var networkDocumentCount = 0;
+                page.Response += async (sender, e) =>
+                {
+                    try
+                    {
+                        var response = e.Response;
+                        var contentType = response.Headers.ContainsKey("content-type") ?
+                            response.Headers["content-type"] : "";
 
-                // Perform the crawl
+                        if (DocumentMimeTypes.Any(mt => contentType.Contains(mt, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            // Try to get the buffer with a timeout
+                            byte[] buffer = null;
+                            try
+                            {
+                                // Use a cancellation token with timeout for buffer retrieval
+                                using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+                                {
+                                    buffer = await response.BufferAsync();
+                                }
+                            }
+                            catch (Exception bufferEx)
+                            {
+                                Console.WriteLine($"   ⚠️  Could not intercept document (may download separately): {bufferEx.Message}");
+                                return; // Skip this response but don't crash
+                            }
+
+                            if (buffer != null && buffer.Length > 0)
+                            {
+                                // Get raw filename for initial message
+                                var rawFilename = ExtractFilenameFromUrl(response.Url) ?? "document";
+
+                                // Fix double extension issue for any file type
+                                rawFilename = RemoveDuplicateExtension(rawFilename);
+
+                                Console.WriteLine($"   📥 Intercepted document: {rawFilename} ({buffer.Length / 1024} KB)");
+
+                                var filePath = await SaveNetworkDocument(response.Url, buffer, response.Headers, evidencePath);
+                                if (!string.IsNullOrEmpty(filePath))
+                                {
+                                    Interlocked.Increment(ref networkDocumentCount);
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        // Don't let network interception errors crash the scraper
+                        Console.WriteLine($"   ⚠️  Network intercept error (continuing): {ex.Message.Split('\n')[0]}");
+                    }
+                };
+
+                // Perform the crawl with content filtering
                 var stats = await CrawlWebsiteAsync(page, url, evidencePath, maxPages, antiDetection);
 
                 result.PagesScraped = stats.Pages;
-                result.DocumentsDownloaded = stats.Documents;
+                result.PagesSkipped = stats.Skipped;
+                result.DocumentsDownloaded = stats.Documents + networkDocumentCount; // Include network intercepted docs
                 result.Failed = stats.Failed;
                 result.DownloadedFiles = stats.DownloadedFiles;
 
@@ -140,11 +198,12 @@ namespace PrivacyLens.Services
                 await SaveScrapeMetadataAsync(result, evidencePath);
 
                 Console.WriteLine($"\n✅ Scraping complete!");
-                Console.WriteLine($"📄 Pages: {result.PagesScraped}");
-                Console.WriteLine($"📁 Documents: {result.DocumentsDownloaded}");
+                Console.WriteLine($"📊 Pages saved: {result.PagesScraped}");
+                Console.WriteLine($"⏩ Pages skipped: {result.PagesSkipped}");
+                Console.WriteLine($"📎 Documents: {result.DocumentsDownloaded}");
                 if (result.Failed > 0)
                     Console.WriteLine($"❌ Failed: {result.Failed}");
-                Console.WriteLine($"\n📂 Evidence saved to:\n   {evidencePath}\n");
+                Console.WriteLine($"\n📁 Evidence saved to:\n   {evidencePath}\n");
             }
             catch (Exception ex)
             {
@@ -161,40 +220,13 @@ namespace PrivacyLens.Services
         }
 
         /// <summary>
-        /// Configure Chrome DevTools Protocol for reliable downloads
+        /// Enhanced crawling with content filtering
         /// </summary>
-        private async Task ConfigureCDPDownloadBehavior(IPage page, string downloadPath)
-        {
-            Directory.CreateDirectory(downloadPath);
-
-            try
-            {
-                // This is MANDATORY for headless downloads to work
-                await page.Client.SendAsync("Page.setDownloadBehavior", new
-                {
-                    behavior = "allow",
-                    downloadPath = downloadPath
-                });
-
-                Console.WriteLine($"   ✅ CDP configured for downloads");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"   ⚠️  CDP configuration warning: {ex.Message}");
-            }
-        }
-
-        /// <summary>
-        /// Enhanced crawling with proper download handling
-        /// </summary>
-        private async Task<(int Pages, int Documents, int Failed, List<string> DownloadedFiles)> CrawlWebsiteAsync(
-            IPage page,
-            string startUrl,
-            string evidencePath,
-            int maxPages,
-            bool antiDetection)
+        private async Task<(int Pages, int Skipped, int Documents, int Failed, List<string> DownloadedFiles)>
+            CrawlWebsiteAsync(IPage page, string startUrl, string evidencePath, int maxPages, bool antiDetection)
         {
             int pagesScraped = 0;
+            int pagesSkipped = 0;
             int documentsDownloaded = 0;
             int failed = 0;
             var downloadedFiles = new List<string>();
@@ -221,7 +253,7 @@ namespace PrivacyLens.Services
 
                     var response = await page.GoToAsync(currentUrl, new NavigationOptions
                     {
-                        WaitUntil = new[] { WaitUntilNavigation.DOMContentLoaded }, // Changed from Networkidle0 which can timeout
+                        WaitUntil = new[] { WaitUntilNavigation.DOMContentLoaded },
                         Timeout = 30000
                     });
 
@@ -241,11 +273,16 @@ namespace PrivacyLens.Services
                     // Check for error pages
                     if (await IsErrorPageAsync(page, title))
                     {
-                        Console.WriteLine("   ⚠️  Skipping error page");
+                        Console.WriteLine("   ⏩ Skipping error page");
+                        pagesSkipped++;
                         continue;
                     }
 
-                    // Scan for document links
+                    // Extract text and analyze content
+                    var textContent = ExtractTextFromHtml(content);
+                    var contentAnalysis = AnalyzeContent(textContent, title, currentUrl);
+
+                    // ALWAYS scan for document links, regardless of page value
                     var documentLinks = await ScanForDocumentLinksAsync(page);
                     if (documentLinks.Count > 0)
                     {
@@ -262,12 +299,30 @@ namespace PrivacyLens.Services
                         }
                     }
 
-                    // Save webpage
-                    await SaveWebpageAsync(currentUrl, title, content, evidencePath);
-                    pagesScraped++;
-                    Console.WriteLine($"   ✅ Saved page: {title ?? "Untitled"}");
+                    // Now decide whether to save the page itself
+                    if (!contentAnalysis.IsValuable)
+                    {
+                        // If page has documents, mention it even though we're not saving the page
+                        if (documentLinks.Count > 0)
+                        {
+                            Console.WriteLine($"   ⏩ Skipping {contentAnalysis.Reason} page (but got {documentLinks.Count} documents): {title}");
+                        }
+                        else
+                        {
+                            Console.WriteLine($"   ⏩ Skipping {contentAnalysis.Reason}: {title}");
+                        }
+                        pagesSkipped++;
+                    }
+                    else
+                    {
+                        // Save webpage - it has valuable content
+                        await SaveWebpageAsync(currentUrl, title, content, evidencePath, contentAnalysis);
+                        pagesScraped++;
+                        Console.WriteLine($"   ✅ Saved page: {title ?? "Untitled"} ({contentAnalysis.WordCount} words)");
+                    }
 
-                    // Extract links for crawling
+                    // ALWAYS extract links for crawling, even from short pages
+                    // This ensures we don't miss important sections of the site
                     var links = await ExtractLinksAsync(page);
                     foreach (var link in links)
                         if (!visitedUrls.Contains(link) && IsAllowedUrl(link))
@@ -280,631 +335,594 @@ namespace PrivacyLens.Services
                 }
             }
 
-            return (pagesScraped, documentsDownloaded, failed, downloadedFiles);
+            return (pagesScraped, pagesSkipped, documentsDownloaded, failed, downloadedFiles);
         }
 
         /// <summary>
-        /// Simple, reliable document download using direct HTTP client
+        /// Extract text content from HTML for analysis
         /// </summary>
-        /// <summary>
-        /// Simple, reliable document download using direct HTTP client
-        /// </summary>
-        private async Task<(bool Success, string? FilePath)> DownloadDocumentAsync(
-            string url, IPage page, string evidencePath)
+        private string ExtractTextFromHtml(string html)
         {
-            try
+            if (string.IsNullOrWhiteSpace(html)) return string.Empty;
+
+            // Remove script and style elements
+            var text = Regex.Replace(html, @"<script[^>]*>[\s\S]*?</script>", " ",
+                RegexOptions.IgnoreCase | RegexOptions.Multiline);
+            text = Regex.Replace(text, @"<style[^>]*>[\s\S]*?</style>", " ",
+                RegexOptions.IgnoreCase | RegexOptions.Multiline);
+
+            // Remove HTML comments
+            text = Regex.Replace(text, @"<!--[\s\S]*?-->", " ");
+
+            // Remove all HTML tags
+            text = Regex.Replace(text, @"<[^>]+>", " ");
+
+            // Decode HTML entities
+            text = System.Net.WebUtility.HtmlDecode(text);
+
+            // Normalize whitespace
+            text = Regex.Replace(text, @"\s+", " ");
+
+            return text.Trim();
+        }
+
+        /// <summary>
+        /// Analyze content to determine if it's worth saving
+        /// </summary>
+        private ContentAnalysis AnalyzeContent(string textContent, string? title, string url)
+        {
+            var analysis = new ContentAnalysis();
+
+            // Basic length check
+            if (textContent.Length < MinimumContentLength)
             {
-                // Check if already downloaded
-                var urlHash = ComputeHash(Encoding.UTF8.GetBytes(url));
-                bool alreadyDownloaded = false;
-                lock (downloadLock)
-                {
-                    if (downloadedUrlHashes.Contains(urlHash))
-                    {
-                        alreadyDownloaded = true;
-                    }
-                    else
-                    {
-                        downloadedUrlHashes.Add(urlHash);
-                    }
-                }
-
-                if (alreadyDownloaded)
-                {
-                    Console.WriteLine($"   ⏭️  Already downloaded: {url}");
-                    return (false, null);
-                }
-
-                var downloadsPath = Path.Combine(evidencePath, "documents");
-                Directory.CreateDirectory(downloadsPath);
-
-                // Extract filename from URL
-                var filename = GetFileNameFromUrl(url);
-                filename = CleanupFilenameString(filename);
-                if (!Path.HasExtension(filename))
-                    filename += ".pdf";
-
-                Console.WriteLine($"   ⬇️  Downloading: {filename}");
-
-                // Method 1: Direct HTTP download (simplest and most reliable)
-                using (var httpClient = new System.Net.Http.HttpClient())
-                {
-                    httpClient.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
-                    httpClient.Timeout = TimeSpan.FromSeconds(30);
-
-                    try
-                    {
-                        // Get cookies from current page and add to request
-                        var cookies = await page.GetCookiesAsync();
-                        if (cookies.Any())
-                        {
-                            var cookieString = string.Join("; ", cookies.Select(c => $"{c.Name}={c.Value}"));
-                            httpClient.DefaultRequestHeaders.Add("Cookie", cookieString);
-                        }
-
-                        // Download the file
-                        var response = await httpClient.GetAsync(url);
-
-                        if (response.IsSuccessStatusCode)
-                        {
-                            var fileBytes = await response.Content.ReadAsByteArrayAsync();
-
-                            if (fileBytes.Length > 0)
-                            {
-                                // Check if it's actually a PDF (or other valid document)
-                                if (!IsValidDocument(fileBytes))
-                                {
-                                    Console.WriteLine($"   ⚠️  Invalid document format (possibly HTML error page)");
-                                    return (false, null);
-                                }
-
-                                // Generate unique filename
-                                var filePath = Path.Combine(downloadsPath, SanitizeFilename(filename));
-                                int counter = 1;
-                                while (File.Exists(filePath))
-                                {
-                                    var nameWithoutExt = Path.GetFileNameWithoutExtension(filename);
-                                    var ext = Path.GetExtension(filename);
-                                    filePath = Path.Combine(downloadsPath, SanitizeFilename($"{nameWithoutExt}_{counter}{ext}"));
-                                    counter++;
-                                }
-
-                                // Save the file
-                                await File.WriteAllBytesAsync(filePath, fileBytes);
-
-                                // Verify and deduplicate
-                                var fileInfo = new FileInfo(filePath);
-                                if (fileInfo.Exists && fileInfo.Length > 0)
-                                {
-                                    var contentHash = await ComputeFileHashAsync(filePath);
-
-                                    bool isDuplicate = false;
-                                    lock (downloadLock)
-                                    {
-                                        if (downloadedContentHashes.Contains(contentHash))
-                                        {
-                                            isDuplicate = true;
-                                        }
-                                        else
-                                        {
-                                            downloadedContentHashes.Add(contentHash);
-                                        }
-                                    }
-
-                                    if (isDuplicate)
-                                    {
-                                        Console.WriteLine("   ⚠️  Duplicate content detected, removing");
-                                        File.Delete(filePath);
-                                        return (false, null);
-                                    }
-
-                                    Console.WriteLine($"   ✅ Downloaded: {Path.GetFileName(filePath)} ({FormatFileSize(fileInfo.Length)})");
-
-                                    // Save metadata
-                                    await SaveDownloadMetadataAsync(url, filePath, contentHash);
-
-                                    return (true, filePath);
-                                }
-                            }
-                            else
-                            {
-                                Console.WriteLine($"   ⚠️  Empty file received");
-                            }
-                        }
-                        else
-                        {
-                            Console.WriteLine($"   ❌ HTTP {(int)response.StatusCode}: {response.ReasonPhrase}");
-                        }
-                    }
-                    catch (System.Net.Http.HttpRequestException httpEx)
-                    {
-                        Console.WriteLine($"   ❌ Network error: {httpEx.Message}");
-                    }
-                    catch (TaskCanceledException)
-                    {
-                        Console.WriteLine($"   ❌ Download timeout");
-                    }
-                }
-
-                // Method 2: If HTTP fails, try browser page evaluation (for JavaScript-protected downloads)
-                try
-                {
-                    Console.WriteLine($"   🔄 Trying browser-based download...");
-
-                    var browser = page.Browser;
-                    if (browser == null) return (false, null);
-
-                    var downloadPage = await browser.NewPageAsync();
-                    try
-                    {
-                        // Set download behavior
-                        await downloadPage.Client.SendAsync("Page.setDownloadBehavior", new
-                        {
-                            behavior = "allow",
-                            downloadPath = downloadsPath
-                        });
-
-                        // Record files before
-                        var filesBefore = Directory.GetFiles(downloadsPath)
-                            .Where(f => !f.EndsWith(".meta.json", StringComparison.OrdinalIgnoreCase))
-                            .ToHashSet();
-
-                        // Navigate to the URL
-                        try
-                        {
-                            await downloadPage.GoToAsync(url, new NavigationOptions
-                            {
-                                WaitUntil = new[] { WaitUntilNavigation.DOMContentLoaded },
-                                Timeout = 15000
-                            });
-                        }
-                        catch (NavigationException ex) when (ex.Message.Contains("net::ERR_ABORTED"))
-                        {
-                            // Expected for downloads
-                        }
-
-                        // Wait a bit for download to start
-                        await Task.Delay(3000);
-
-                        // Check for new files
-                        var filesAfter = Directory.GetFiles(downloadsPath)
-                            .Where(f => !f.EndsWith(".meta.json", StringComparison.OrdinalIgnoreCase))
-                            .ToHashSet();
-
-                        var newFiles = filesAfter.Except(filesBefore).ToList();
-                        if (newFiles.Any())
-                        {
-                            var downloadedFile = newFiles.First();
-
-                            // Wait for file to be fully written
-                            await Task.Delay(2000);
-
-                            var fileInfo = new FileInfo(downloadedFile);
-                            if (fileInfo.Exists && fileInfo.Length > 0)
-                            {
-                                var contentHash = await ComputeFileHashAsync(downloadedFile);
-
-                                bool isDuplicate = false;
-                                lock (downloadLock)
-                                {
-                                    if (downloadedContentHashes.Contains(contentHash))
-                                    {
-                                        isDuplicate = true;
-                                    }
-                                    else
-                                    {
-                                        downloadedContentHashes.Add(contentHash);
-                                    }
-                                }
-
-                                if (!isDuplicate)
-                                {
-                                    Console.WriteLine($"   ✅ Downloaded via browser: {Path.GetFileName(downloadedFile)} ({FormatFileSize(fileInfo.Length)})");
-                                    await SaveDownloadMetadataAsync(url, downloadedFile, contentHash);
-                                    return (true, downloadedFile);
-                                }
-                            }
-                        }
-                    }
-                    finally
-                    {
-                        await downloadPage.CloseAsync();
-                    }
-                }
-                catch (Exception browserEx)
-                {
-                    Console.WriteLine($"   ⚠️  Browser method error: {browserEx.Message}");
-                }
-
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"   ❌ Download error: {ex.Message}");
+                analysis.IsValuable = false;
+                analysis.Reason = "too short";
+                return analysis;
             }
 
-            Console.WriteLine($"   ⚠️  All download methods failed for: {url}");
-            return (false, null);
-        }
+            // Word count analysis
+            var words = textContent.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            analysis.WordCount = words.Length;
 
-        /// <summary>
-        /// Check if byte array looks like a valid document (not HTML error page)
-        /// </summary>
-        private bool IsValidDocument(byte[] fileBytes)
-        {
-            if (fileBytes == null || fileBytes.Length < 10)
-                return false;
-
-            // Check for PDF signature
-            if (fileBytes[0] == 0x25 && fileBytes[1] == 0x50 && fileBytes[2] == 0x44 && fileBytes[3] == 0x46) // %PDF
-                return true;
-
-            // Check for ZIP/Office signatures (DOCX, XLSX, PPTX are ZIP files)
-            if (fileBytes[0] == 0x50 && fileBytes[1] == 0x4B) // PK
-                return true;
-
-            // Check for old Office format
-            if (fileBytes[0] == 0xD0 && fileBytes[1] == 0xCF && fileBytes[2] == 0x11 && fileBytes[3] == 0xE0) // OLE
-                return true;
-
-            // Check if it's HTML (error page)
-            var text = System.Text.Encoding.UTF8.GetString(fileBytes.Take(500).ToArray()).ToLower();
-            if (text.Contains("<!doctype") || text.Contains("<html") || text.Contains("error") || text.Contains("404"))
-                return false;
-
-            // Default to valid for other formats
-            return true;
-        }
-
-        /// <summary>
-        /// Clean up duplicate extensions in filename string
-        /// </summary>
-        private string CleanupFilenameString(string filename)
-        {
-            // Fix patterns like .pdf.pdf or _as_pdfSomething.pdf
-            filename = Regex.Replace(filename, @"(picture_)?as_pdf", "", RegexOptions.IgnoreCase);
-            filename = Regex.Replace(filename, @"(\.\w{3,4})\1$", "$1"); // Remove duplicate extensions
-            filename = Regex.Replace(filename, @"\.pdf\.pdf$", ".pdf", RegexOptions.IgnoreCase);
-            return filename;
-        }
-
-        /// <summary>
-        /// Check if response looks like a document
-        /// </summary>
-        private bool IsDocumentResponse(IResponse response)
-        {
-            if (response.Headers.TryGetValue("content-type", out var contentType))
+            if (analysis.WordCount < MinimumWordCount)
             {
-                var mimeType = contentType.Split(';')[0].Trim().ToLower();
-
-                // Common document MIME types
-                return mimeType.Contains("pdf") ||
-                       mimeType.Contains("document") ||
-                       mimeType.Contains("msword") ||
-                       mimeType.Contains("excel") ||
-                       mimeType.Contains("spreadsheet") ||
-                       mimeType.Contains("powerpoint") ||
-                       mimeType.Contains("presentation") ||
-                       mimeType.Contains("zip") ||
-                       mimeType == "application/octet-stream";
+                analysis.IsValuable = false;
+                analysis.Reason = "insufficient content";
+                return analysis;
             }
 
-            return false;
-        }
+            // Check link-to-word ratio (navigation pages have many links)
+            var linkCount = Regex.Matches(textContent, @"https?://").Count +
+                           Regex.Matches(textContent, @"www\.").Count;
+            var linkRatio = (double)linkCount / analysis.WordCount;
 
-        /// <summary>
-        /// Clean up filenames with duplicate extensions
-        /// </summary>
-        private string CleanupFilename(string filePath)
-        {
-            var dir = Path.GetDirectoryName(filePath);
-            var filename = Path.GetFileName(filePath);
-
-            // Fix double extensions like .pdf.pdf
-            var pattern = @"(\.\w{3,4})\1$"; // Matches duplicate extensions
-            if (System.Text.RegularExpressions.Regex.IsMatch(filename, pattern))
+            if (linkRatio > MaxLinkToWordRatio)
             {
-                filename = System.Text.RegularExpressions.Regex.Replace(filename, pattern, "$1");
-                var newPath = Path.Combine(dir, filename);
-
-                if (File.Exists(filePath) && !File.Exists(newPath))
-                {
-                    File.Move(filePath, newPath);
-                    return newPath;
-                }
+                analysis.IsValuable = false;
+                analysis.Reason = "navigation/menu page";
+                return analysis;
             }
 
-            return filePath;
+            // Check for navigation keywords in title and URL
+            var navKeywords = new[] { "sitemap", "menu", "navigation", "index", "directory", "404", "error" };
+            var titleLower = (title ?? "").ToLower();
+            var urlLower = url.ToLower();
+
+            if (navKeywords.Any(k => titleLower.Contains(k) || urlLower.Contains(k)))
+            {
+                analysis.IsValuable = false;
+                analysis.Reason = "navigation page";
+                return analysis;
+            }
+
+            // Check for valuable keywords (governance/compliance related)
+            var valuableKeywords = new[] {
+                "policy", "privacy", "compliance", "governance", "security",
+                "procedure", "standard", "guideline", "regulation", "data",
+                "personal", "information", "consent", "rights", "obligation"
+            };
+
+            var textLower = textContent.ToLower();
+            analysis.ValueScore = valuableKeywords.Count(k => textLower.Contains(k));
+
+            // High-value content detection
+            if (analysis.ValueScore >= 3)
+            {
+                analysis.IsValuable = true;
+                analysis.Reason = "governance content";
+                analysis.ContentType = "governance";
+                return analysis;
+            }
+
+            // Check paragraph structure (real content has paragraphs)
+            var sentences = Regex.Split(textContent, @"[.!?]+");
+            var avgSentenceLength = sentences.Average(s => s.Split(' ').Length);
+
+            if (avgSentenceLength < 5) // Very short sentences suggest lists/menus
+            {
+                analysis.IsValuable = false;
+                analysis.Reason = "list/menu structure";
+                return analysis;
+            }
+
+            // Default: accept if we got this far
+            analysis.IsValuable = true;
+            analysis.Reason = "general content";
+            analysis.ContentType = "general";
+
+            return analysis;
         }
 
         /// <summary>
-        /// Extract filename from URL
+        /// Save webpage with metadata including content analysis
         /// </summary>
-        private string GetFileNameFromUrl(string url)
+        private async Task SaveWebpageAsync(string url, string? title, string content,
+            string evidencePath, ContentAnalysis analysis)
+        {
+            var urlHash = ComputeHash(Encoding.UTF8.GetBytes(url)).Substring(0, 8);
+            var safeName = SanitizeFilename(new Uri(url).AbsolutePath.Trim('/').Replace('/', '_'));
+            if (string.IsNullOrEmpty(safeName)) safeName = "index";
+
+            var htmlPath = Path.Combine(evidencePath, "webpages", $"{safeName}_{urlHash}.html");
+            await File.WriteAllTextAsync(htmlPath, content);
+
+            var metadata = new
+            {
+                Url = url,
+                Title = title,
+                ScrapedAt = DateTime.UtcNow,
+                ContentLength = content.Length,
+                WordCount = analysis.WordCount,
+                ContentType = analysis.ContentType,
+                ValueScore = analysis.ValueScore,
+                IsValuable = analysis.IsValuable
+            };
+
+            var metaPath = Path.Combine(evidencePath, "webpages", $"{safeName}_{urlHash}.meta.json");
+            await File.WriteAllTextAsync(metaPath, JsonSerializer.Serialize(metadata,
+                new JsonSerializerOptions { WriteIndented = true }));
+        }
+
+        // Content analysis helper class
+        private class ContentAnalysis
+        {
+            public bool IsValuable { get; set; } = false;
+            public string Reason { get; set; } = "";
+            public int WordCount { get; set; }
+            public int ValueScore { get; set; }
+            public string ContentType { get; set; } = "unknown";
+        }
+
+        #region Existing Helper Methods (unchanged)
+
+        private async Task CreateDirectoryStructureAsync(string evidencePath)
+        {
+            Directory.CreateDirectory(evidencePath);
+            Directory.CreateDirectory(Path.Combine(evidencePath, "webpages"));
+            Directory.CreateDirectory(Path.Combine(evidencePath, "documents"));
+            Directory.CreateDirectory(Path.Combine(evidencePath, "_metadata"));
+            await Task.CompletedTask;
+        }
+
+        private void SetupAllowedDomains(string startUrl)
+        {
+            var uri = new Uri(startUrl);
+            allowedDomains.Clear();
+            allowedDomains.Add(uri.Host);
+            allowedDomains.Add(uri.Host.Replace("www.", ""));
+            if (!uri.Host.StartsWith("www."))
+                allowedDomains.Add("www." + uri.Host);
+        }
+
+        private bool IsAllowedUrl(string url)
         {
             try
             {
                 var uri = new Uri(url);
-                var filename = Path.GetFileName(uri.LocalPath);
-
-                // Clean up the filename
-                if (!string.IsNullOrEmpty(filename))
-                {
-                    // URL decode the filename
-                    filename = Uri.UnescapeDataString(filename);
-
-                    // Remove duplicate extensions
-                    var pattern = @"(\.\w{3,4})\1$";
-                    if (Regex.IsMatch(filename, pattern))
-                    {
-                        filename = Regex.Replace(filename, pattern, "$1");
-                    }
-
-                    return filename;
-                }
+                return allowedDomains.Any(domain =>
+                    uri.Host.Equals(domain, StringComparison.OrdinalIgnoreCase));
             }
-            catch { }
-
-            return "document";
-        }
-
-        /// <summary>
-        /// Wait for download to complete using filesystem polling
-        /// </summary>
-        private async Task<string?> WaitForDownloadAsync(
-            string downloadPath,
-            Dictionary<string, DateTime> filesBefore,
-            int timeoutMs = 30000)
-        {
-            var startTime = DateTime.UtcNow;
-            var timeout = TimeSpan.FromMilliseconds(timeoutMs);
-            string? lastNewFile = null;
-
-            while (DateTime.UtcNow - startTime < timeout)
+            catch
             {
-                // Get all non-temporary files
-                var currentFiles = Directory.GetFiles(downloadPath)
-                    .Where(f => !f.EndsWith(".crdownload", StringComparison.OrdinalIgnoreCase) &&
-                                !f.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase) &&
-                                !f.EndsWith(".part", StringComparison.OrdinalIgnoreCase) &&
-                                !f.EndsWith(".downloading", StringComparison.OrdinalIgnoreCase))
-                    .Select(f => new FileInfo(f))
-                    .Where(f => f.Length > 0) // Ensure file has content
-                    .ToList();
-
-                // Find new files
-                foreach (var file in currentFiles)
-                {
-                    if (!filesBefore.ContainsKey(file.FullName) ||
-                        file.CreationTimeUtc > filesBefore[file.FullName])
-                    {
-                        // New file found, but wait a bit to ensure it's fully written
-                        if (lastNewFile == file.FullName)
-                        {
-                            // Same file seen twice, likely complete
-                            return file.FullName;
-                        }
-                        lastNewFile = file.FullName;
-                    }
-                }
-
-                await Task.Delay(500);
+                return false;
             }
-
-            return lastNewFile; // Return last new file even if timeout
         }
 
-        /// <summary>
-        /// Enhanced network interception setup
-        /// </summary>
-        private async Task SetupNetworkInterceptionAsync(IPage page, string evidencePath)
-        {
-            var downloadsPath = Path.Combine(evidencePath, "documents");
-            var activeDownloads = new HashSet<string>();
-
-            page.Response += async (sender, e) =>
-            {
-                try
-                {
-                    var response = e.Response;
-                    if (!response.Ok) return;
-
-                    // Skip if URL suggests it's not a document
-                    var url = response.Url.ToLower();
-                    if (url.Contains(".json") ||
-                        url.Contains(".js") ||
-                        url.Contains(".css") ||
-                        url.Contains("/api/") ||
-                        url.Contains("/feed/") ||
-                        url.Contains("/ajax/"))
-                        return;
-
-                    // Skip if already processing
-                    lock (activeDownloads)
-                    {
-                        if (activeDownloads.Contains(response.Url))
-                            return;
-                        activeDownloads.Add(response.Url);
-                    }
-
-                    try
-                    {
-                        if (IsDownloadResponse(response))
-                        {
-                            Console.WriteLine($"   🔍 Intercepted potential download: {response.Url}");
-
-                            // The CDP download behavior should handle this
-                            // We just need to wait for it to complete
-                            var filesBefore = Directory.GetFiles(downloadsPath)
-                                .Select(f => new FileInfo(f))
-                                .ToDictionary(f => f.FullName, f => f.CreationTimeUtc);
-
-                            var downloadedFile = await WaitForDownloadAsync(downloadsPath, filesBefore, 10000);
-                            if (!string.IsNullOrEmpty(downloadedFile))
-                            {
-                                Console.WriteLine($"   ✅ Network intercept saved: {Path.GetFileName(downloadedFile)}");
-                            }
-                        }
-                    }
-                    finally
-                    {
-                        lock (activeDownloads)
-                        {
-                            activeDownloads.Remove(response.Url);
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"   ⚠️  Response handler error: {ex.Message}");
-                }
-            };
-
-            // Enable request interception
-            await page.SetRequestInterceptionAsync(true);
-            page.Request += async (sender, e) => await e.Request.ContinueAsync();
-        }
-
-        /// <summary>
-        /// Initialize browser with production-ready configuration
-        /// </summary>
         private async Task InitializeBrowserAsync(bool antiDetection)
         {
-            Console.WriteLine("🌐 Initializing browser...");
-
-            var browserFetcher = new BrowserFetcher();
-            await browserFetcher.DownloadAsync();
-
-            var args = new List<string>
-            {
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--no-first-run",
-                "--no-zygote",
-                "--deterministic-fetch",
-                "--disable-features=IsolateOrigins",
-                "--disable-site-isolation-trials",
-                // Handle HTTPS certificate errors (useful for self-signed certs)
-                "--ignore-certificate-errors",
-                "--ignore-certificate-errors-spki-list",
-                // Additional stability flags
-                "--disable-accelerated-2d-canvas",
-                "--disable-breakpad",
-                "--disable-features=TranslateUI",
-                "--disable-ipc-flooding-protection",
-                "--disable-renderer-backgrounding",
-                "--force-color-profile=srgb",
-                "--metrics-recording-only",
-                "--mute-audio",
-                "--no-default-browser-check"
-            };
-
-            if (antiDetection)
-            {
-                args.Add("--disable-blink-features=AutomationControlled");
-                args.Add("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
-            }
-
-            var launchOptions = new LaunchOptions
+            var options = new LaunchOptions
             {
                 Headless = true,
-                Args = args.ToArray(),
-                DefaultViewport = new ViewPortOptions { Width = 1920, Height = 1080 },
-                Timeout = 60000,
-                IgnoreDefaultArgs = false
+                Args = antiDetection ?
+                    new[] { "--disable-blink-features=AutomationControlled", "--no-sandbox" } :
+                    new[] { "--no-sandbox" }
             };
 
-            browser = await Puppeteer.LaunchAsync(launchOptions);
-            Console.WriteLine("✅ Browser initialized");
+            browser = await Puppeteer.LaunchAsync(options);
+        }
+
+        private async Task CloseBrowserAsync()
+        {
+            if (browser != null)
+            {
+                await browser.CloseAsync();
+                browser = null;
+            }
+        }
+
+        private async Task ConfigureCDPDownloadBehavior(IPage page, string downloadPath)
+        {
+            Directory.CreateDirectory(downloadPath);
+            try
+            {
+                await page.Client.SendAsync("Page.setDownloadBehavior", new
+                {
+                    behavior = "allow",
+                    downloadPath = downloadPath
+                });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"   ⚠️  CDP configuration warning: {ex.Message}");
+            }
+        }
+
+        private async Task<string?> SaveNetworkDocument(string url, byte[] buffer,
+            Dictionary<string, string> headers, string evidencePath)
+        {
+            var contentHash = ComputeHash(buffer.Take(4096).ToArray());
+            lock (downloadLock)
+            {
+                if (downloadedContentHashes.Contains(contentHash))
+                {
+                    Console.WriteLine($"   ⏩ Duplicate document skipped");
+                    return null;
+                }
+                downloadedContentHashes.Add(contentHash);
+            }
+
+            // Extract filename from URL
+            var filename = ExtractFilenameFromUrl(url) ?? $"document_{contentHash.Substring(0, 8)}";
+
+            // Fix double extension issue for any file type
+            filename = RemoveDuplicateExtension(filename);
+
+            // Check if filename already has an extension
+            var extension = Path.GetExtension(filename);
+            if (string.IsNullOrEmpty(extension))
+            {
+                // No extension in filename, get it from MIME type
+                extension = GetExtensionFromMimeType(headers.GetValueOrDefault("content-type", ""));
+                filename = filename + extension;
+            }
+
+            // Sanitize the complete filename (with extension)
+            var safeName = SanitizeFilename(filename);
+
+            var filePath = Path.Combine(evidencePath, "documents", safeName);
+
+            await File.WriteAllBytesAsync(filePath, buffer);
+            await SaveDownloadMetadataAsync(url, filePath, contentHash);
+
+            Console.WriteLine($"   ✅ Saved via network: {safeName} ({buffer.Length / 1024} KB)");
+            return filePath;
         }
 
         /// <summary>
-        /// Check if response indicates a file download
+        /// Remove duplicate extensions like .pdf.pdf, .docx.docx, etc.
         /// </summary>
-        private bool IsDownloadResponse(IResponse response)
+        private string RemoveDuplicateExtension(string filename)
         {
-            // Check Content-Type
-            if (response.Headers.TryGetValue("content-type", out var contentType))
+            if (string.IsNullOrEmpty(filename))
+                return filename;
+
+            // Get the extension
+            var extension = Path.GetExtension(filename);
+            if (string.IsNullOrEmpty(extension))
+                return filename;
+
+            // Check if the filename ends with a double extension (e.g., .pdf.pdf)
+            var doubleExtension = extension + extension;
+            if (filename.EndsWith(doubleExtension, StringComparison.OrdinalIgnoreCase))
             {
-                var mimeType = contentType.Split(';')[0].Trim().ToLower();
-
-                // Skip HTML, JSON, XML, and other non-document types
-                if (mimeType == "text/html" ||
-                    mimeType == "application/json" ||
-                    mimeType == "application/xml" ||
-                    mimeType == "text/xml" ||
-                    mimeType.StartsWith("image/") ||
-                    mimeType.StartsWith("video/") ||
-                    mimeType.StartsWith("audio/"))
-                    return false;
-
-                if (DocumentMimeTypes.Contains(mimeType))
-                    return true;
-
-                // Check for octet-stream only if there's a download disposition
-                if (mimeType == "application/octet-stream")
-                {
-                    if (response.Headers.TryGetValue("content-disposition", out var disposition))
-                    {
-                        return disposition.Contains("attachment", StringComparison.OrdinalIgnoreCase);
-                    }
-                    return false;
-                }
+                // Remove the duplicate extension
+                return filename.Substring(0, filename.Length - extension.Length);
             }
 
-            // Check Content-Disposition
-            if (response.Headers.TryGetValue("content-disposition", out var contentDisposition))
+            return filename;
+        }
+
+        private async Task<(bool Success, string? FilePath)> DownloadDocumentAsync(
+            string docUrl, IPage page, string evidencePath)
+        {
+            try
             {
-                if (contentDisposition.Contains("attachment", StringComparison.OrdinalIgnoreCase))
+                var urlHash = ComputeHash(Encoding.UTF8.GetBytes(docUrl));
+                lock (downloadLock)
+                {
+                    if (downloadedUrlHashes.Contains(urlHash))
+                        return (false, null);
+                    downloadedUrlHashes.Add(urlHash);
+                }
+
+                // Use fetch to download with the same session context - with timeout
+                var jsCode = @"
+                    async (url) => {
+                        try {
+                            const controller = new AbortController();
+                            const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout
+                            
+                            const response = await fetch(url, {
+                                method: 'GET',
+                                credentials: 'same-origin',
+                                signal: controller.signal,
+                                headers: {
+                                    'Accept': 'application/pdf,application/msword,application/vnd.ms-excel,application/vnd.ms-powerpoint,*/*'
+                                }
+                            });
+                            
+                            clearTimeout(timeoutId);
+                            
+                            if (!response.ok) {
+                                return { success: false, status: response.status };
+                            }
+                            
+                            // Check content length - if too large, skip body download
+                            const contentLength = response.headers.get('content-length');
+                            if (contentLength && parseInt(contentLength) > 50 * 1024 * 1024) { // 50MB limit
+                                return { success: false, error: 'File too large for inline download' };
+                            }
+                            
+                            const buffer = await response.arrayBuffer();
+                            const bytes = new Uint8Array(buffer);
+                            const contentType = response.headers.get('content-type') || '';
+                            const disposition = response.headers.get('content-disposition') || '';
+                            
+                            return {
+                                success: true,
+                                data: Array.from(bytes),
+                                contentType: contentType,
+                                contentDisposition: disposition,
+                                status: response.status
+                            };
+                        } catch (error) {
+                            if (error.name === 'AbortError') {
+                                return { success: false, error: 'Download timeout (15s)' };
+                            }
+                            return { success: false, error: error.message };
+                        }
+                    }
+                ";
+
+                JsonElement resultJson;
+                try
+                {
+                    // Add timeout to the evaluation itself
+                    using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20)))
+                    {
+                        resultJson = await page.EvaluateFunctionAsync<JsonElement>(jsCode, docUrl);
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    Console.WriteLine($"   ⚠️  Download timeout: {docUrl}");
+                    return (false, null);
+                }
+                catch (Exception evalEx)
+                {
+                    Console.WriteLine($"   ⚠️  Download evaluation failed: {evalEx.Message.Split('\n')[0]}");
+                    return (false, null);
+                }
+
+                if (!resultJson.TryGetProperty("success", out var successProp) || !successProp.GetBoolean())
+                {
+                    if (resultJson.TryGetProperty("error", out var errorProp))
+                    {
+                        Console.WriteLine($"   ⚠️  Download failed: {errorProp.GetString()}");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"   ⚠️  Download failed: {docUrl}");
+                    }
+                    return (false, null);
+                }
+
+                // Convert JavaScript array back to byte array
+                if (!resultJson.TryGetProperty("data", out var dataProp))
+                {
+                    Console.WriteLine($"   ⚠️  No data received: {docUrl}");
+                    return (false, null);
+                }
+
+                var dataArray = dataProp.EnumerateArray().Select(e => (byte)e.GetInt32()).ToArray();
+
+                if (dataArray.Length == 0)
+                    return (false, null);
+
+                // Check if we got an HTML error page instead of a document
+                if (IsLikelyHtmlError(dataArray))
+                {
+                    Console.WriteLine($"   ⚠️  Received HTML error page instead of document: {docUrl}");
+                    return (false, null);
+                }
+
+                var contentHash = ComputeHash(dataArray.Take(4096).ToArray());
+                lock (downloadLock)
+                {
+                    if (downloadedContentHashes.Contains(contentHash))
+                        return (false, null);
+                    downloadedContentHashes.Add(contentHash);
+                }
+
+                // Build headers dictionary for filename extraction
+                var headers = new Dictionary<string, string>();
+                if (resultJson.TryGetProperty("contentType", out var contentTypeProp))
+                    headers["content-type"] = contentTypeProp.GetString() ?? "";
+                if (resultJson.TryGetProperty("contentDisposition", out var contentDispProp))
+                    headers["content-disposition"] = contentDispProp.GetString() ?? "";
+
+                var filename = ExtractFilenameFromHeaders(headers) ??
+                              ExtractFilenameFromUrl(docUrl) ??
+                              $"document_{urlHash.Substring(0, 8)}";
+
+                // Check if filename already has an extension
+                var extension = Path.GetExtension(filename);
+                if (string.IsNullOrEmpty(extension))
+                {
+                    // No extension in filename, get it from MIME type
+                    extension = GetExtensionFromMimeType(headers.GetValueOrDefault("content-type", ""));
+                    filename = filename + extension;
+                }
+
+                // Sanitize the complete filename (with extension)
+                var safeName = SanitizeFilename(filename);
+                var filePath = Path.Combine(evidencePath, "documents", safeName);
+
+                await File.WriteAllBytesAsync(filePath, dataArray);
+                await SaveDownloadMetadataAsync(docUrl, filePath, contentHash);
+
+                Console.WriteLine($"   ✅ Downloaded: {safeName} ({dataArray.Length / 1024} KB)");
+                return (true, filePath);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"   ⚠️  Download failed for {docUrl}: {ex.Message}");
+                return (false, null);
+            }
+        }
+
+        private bool IsLikelyHtmlError(byte[] buffer)
+        {
+            // Check if the file starts with HTML-like content
+            if (buffer.Length < 100)
+                return false;
+
+            var start = Encoding.UTF8.GetString(buffer.Take(500).ToArray()).ToLower();
+
+            // Check for HTML signatures
+            if (start.Contains("<!doctype html") ||
+                start.Contains("<html") ||
+                start.Contains("<head") ||
+                start.Contains("<?xml"))
+            {
+                // It's HTML/XML, check if it's an error page
+                if (start.Contains("error") ||
+                    start.Contains("404") ||
+                    start.Contains("403") ||
+                    start.Contains("unauthorized") ||
+                    start.Contains("access denied"))
+                {
                     return true;
+                }
+
+                // Any HTML when we're expecting a document is likely an error
+                return true;
+            }
+
+            // Check for PDF signature
+            if (buffer.Length >= 4)
+            {
+                var pdfSignature = new byte[] { 0x25, 0x50, 0x44, 0x46 }; // %PDF
+                if (buffer.Take(4).SequenceEqual(pdfSignature))
+                    return false; // It's a valid PDF
             }
 
             return false;
         }
 
-        /// <summary>
-        /// Extract filename from Content-Disposition header
-        /// </summary>
-        private string? ExtractFilenameFromHeaders(IDictionary<string, string> headers)
+        private async Task<bool> IsErrorPageAsync(IPage page, string? title)
+        {
+            if (string.IsNullOrEmpty(title))
+                return false;
+
+            var errorIndicators = new[] { "404", "403", "500", "error", "not found", "forbidden", "denied" };
+            var titleLower = title.ToLower();
+
+            if (errorIndicators.Any(e => titleLower.Contains(e)))
+            {
+                var bodyText = await page.EvaluateFunctionAsync<string>("() => document.body?.innerText || ''");
+                return bodyText.Length < 500;
+            }
+
+            return false;
+        }
+
+        private string ComputeHash(byte[] data)
+        {
+            using var sha256 = SHA256.Create();
+            var hash = sha256.ComputeHash(data);
+            return BitConverter.ToString(hash).Replace("-", "").ToLower();
+        }
+
+        private string SanitizeFilename(string filename)
+        {
+            var invalid = Path.GetInvalidFileNameChars();
+            var sanitized = string.Join("_", filename.Split(invalid));
+            return sanitized.Length > 200 ? sanitized.Substring(0, 200) : sanitized;
+        }
+
+        private string? ExtractFilenameFromUrl(string url)
+        {
+            try
+            {
+                var uri = new Uri(url);
+                var path = uri.AbsolutePath;
+                if (!string.IsNullOrEmpty(path) && path != "/")
+                {
+                    var filename = Path.GetFileName(path);
+                    if (!string.IsNullOrEmpty(filename))
+                        return filename;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private string? ExtractFilenameFromHeaders(Dictionary<string, string> headers)
         {
             if (headers.TryGetValue("content-disposition", out var disposition))
             {
                 try
                 {
-                    if (ContentDispositionHeaderValue.TryParse(disposition, out var parsed))
-                    {
-                        var filename = parsed.FileNameStar ?? parsed.FileName;
-                        if (!string.IsNullOrWhiteSpace(filename))
-                        {
-                            // Remove quotes if present
-                            filename = filename.Trim('"');
-                            return SanitizeFilename(filename);
-                        }
-                    }
+                    var content = ContentDispositionHeaderValue.Parse(disposition);
+                    return content.FileName?.Trim('"');
                 }
                 catch
                 {
-                    // Fallback to regex if parsing fails
-                    var match = System.Text.RegularExpressions.Regex.Match(
-                        disposition, @"filename[*]?=[""']?([^;""']+)");
+                    var match = Regex.Match(disposition, @"filename[*]?=[""']?([^;""']+)");
                     if (match.Success)
-                        return SanitizeFilename(match.Groups[1].Value);
+                        return match.Groups[1].Value;
                 }
             }
             return null;
         }
 
-        /// <summary>
-        /// Scan page for document links
-        /// </summary>
+        private string GetExtensionFromMimeType(string? mimeType)
+        {
+            if (string.IsNullOrEmpty(mimeType))
+                return ".bin";
+
+            return mimeType.ToLower() switch
+            {
+                var mt when mt.Contains("pdf") => ".pdf",
+                var mt when mt.Contains("word") => ".docx",
+                var mt when mt.Contains("excel") => ".xlsx",
+                var mt when mt.Contains("powerpoint") => ".pptx",
+                var mt when mt.Contains("text") => ".txt",
+                var mt when mt.Contains("csv") => ".csv",
+                var mt when mt.Contains("zip") => ".zip",
+                _ => ".bin"
+            };
+        }
+
         private async Task<List<string>> ScanForDocumentLinksAsync(IPage page)
         {
             return await page.EvaluateFunctionAsync<List<string>>(@"
                 () => {
                     const links = [];
                     const anchors = document.querySelectorAll('a[href]');
-                    const extensions = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.txt', '.csv', '.rtf', '.zip'];
+                    const extensions = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx'];
                     
                     anchors.forEach(anchor => {
                         const href = anchor.href;
@@ -913,21 +931,17 @@ namespace PrivacyLens.Services
                         }
                     });
                     
-                    // Also check for download attribute
                     document.querySelectorAll('a[download]').forEach(anchor => {
                         if (anchor.href && !links.includes(anchor.href)) {
                             links.push(anchor.href);
                         }
                     });
                     
-                    return [...new Set(links)]; // Remove duplicates
+                    return [...new Set(links)];
                 }
             ");
         }
 
-        /// <summary>
-        /// Extract all links from page
-        /// </summary>
         private async Task<List<string>> ExtractLinksAsync(IPage page)
         {
             return await page.EvaluateFunctionAsync<List<string>>(@"
@@ -944,38 +958,11 @@ namespace PrivacyLens.Services
                             links.push(href);
                         }
                     });
-                    return [...new Set(links)]; // Remove duplicates
+                    return [...new Set(links)];
                 }
             ");
         }
 
-        /// <summary>
-        /// Save webpage content and metadata
-        /// </summary>
-        private async Task SaveWebpageAsync(string url, string? title, string content, string evidencePath)
-        {
-            var urlHash = ComputeHash(Encoding.UTF8.GetBytes(url)).Substring(0, 8);
-            var safeName = SanitizeFilename(new Uri(url).AbsolutePath.Trim('/').Replace('/', '_'));
-            if (string.IsNullOrEmpty(safeName)) safeName = "index";
-
-            var htmlPath = Path.Combine(evidencePath, "webpages", $"{safeName}_{urlHash}.html");
-            await File.WriteAllTextAsync(htmlPath, content);
-
-            var metadata = new
-            {
-                Url = url,
-                Title = title,
-                ScrapedAt = DateTime.UtcNow,
-                ContentLength = content.Length
-            };
-            var metaPath = Path.Combine(evidencePath, "webpages", $"{safeName}_{urlHash}.meta.json");
-            await File.WriteAllTextAsync(metaPath, JsonSerializer.Serialize(metadata,
-                new JsonSerializerOptions { WriteIndented = true }));
-        }
-
-        /// <summary>
-        /// Save download metadata
-        /// </summary>
         private async Task SaveDownloadMetadataAsync(string originalUrl, string filePath, string contentHash)
         {
             var fileInfo = new FileInfo(filePath);
@@ -994,9 +981,6 @@ namespace PrivacyLens.Services
                 new JsonSerializerOptions { WriteIndented = true }));
         }
 
-        /// <summary>
-        /// Save scrape session metadata
-        /// </summary>
         private async Task SaveScrapeMetadataAsync(ScrapeResult result, string evidencePath)
         {
             var metadata = new
@@ -1005,148 +989,29 @@ namespace PrivacyLens.Services
                 result.TargetUrl,
                 result.StartTime,
                 result.EndTime,
+                Duration = (result.EndTime - result.StartTime).TotalMinutes,
                 Stats = new
                 {
-                    Pages = result.PagesScraped,
+                    PagesSaved = result.PagesScraped,
+                    PagesSkipped = result.PagesSkipped,
                     Documents = result.DocumentsDownloaded,
                     Failed = result.Failed
                 },
-                Duration = (result.EndTime - result.StartTime).TotalSeconds,
-                DownloadedFiles = result.DownloadedFiles.Select(Path.GetFileName).ToList()
+                Files = result.DownloadedFiles
             };
 
-            var metadataPath = Path.Combine(evidencePath, "scrape_metadata.json");
-            await File.WriteAllTextAsync(metadataPath, JsonSerializer.Serialize(metadata,
+            var metaPath = Path.Combine(evidencePath, "_metadata", "scrape_summary.json");
+            Directory.CreateDirectory(Path.GetDirectoryName(metaPath)!);
+
+            await File.WriteAllTextAsync(metaPath, JsonSerializer.Serialize(metadata,
                 new JsonSerializerOptions { WriteIndented = true }));
         }
 
-        /// <summary>
-        /// Create directory structure for evidence
-        /// </summary>
-        private async Task CreateDirectoryStructureAsync(string evidencePath)
-        {
-            Directory.CreateDirectory(Path.Combine(evidencePath, "webpages"));
-            Directory.CreateDirectory(Path.Combine(evidencePath, "documents"));
-            Directory.CreateDirectory(Path.Combine(evidencePath, "screenshots"));
-            await Task.CompletedTask;
-        }
-
-        /// <summary>
-        /// Setup allowed domains for crawling
-        /// </summary>
-        private void SetupAllowedDomains(string url)
-        {
-            var uri = new Uri(url);
-            var mainDomain = uri.Host.Replace("www.", "");
-
-            allowedDomains.Clear();
-            allowedDomains.Add(mainDomain);
-
-            // Add common subdomains
-            var subdomains = new[] { "www", "docs", "support", "help", "privacy", "legal", "download", "files", "cdn" };
-            foreach (var sub in subdomains)
-                allowedDomains.Add($"{sub}.{mainDomain}");
-
-            Console.WriteLine($"📍 Restricting to domain: {mainDomain} and subdomains");
-        }
-
-        /// <summary>
-        /// Check if URL is allowed for crawling
-        /// </summary>
-        private bool IsAllowedUrl(string url)
-        {
-            try
-            {
-                var uri = new Uri(url);
-                if (uri.Scheme != "http" && uri.Scheme != "https")
-                    return false;
-
-                var domain = uri.Host.Replace("www.", "");
-                return allowedDomains.Any(allowed =>
-                    domain.Equals(allowed, StringComparison.OrdinalIgnoreCase) ||
-                    domain.EndsWith($".{allowed}", StringComparison.OrdinalIgnoreCase));
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// Check if page is an error page
-        /// </summary>
-        private async Task<bool> IsErrorPageAsync(IPage page, string? title)
-        {
-            var text = await page.EvaluateFunctionAsync<string>("() => document.body?.innerText || ''");
-            var indicators = new[] { "404", "not found", "error", "forbidden", "access denied", "page not found" };
-            var content = $"{title} {text}".ToLower();
-            return indicators.Any(indicator => content.Contains(indicator)) && text.Length < 1000;
-        }
-
-        /// <summary>
-        /// Sanitize filename for filesystem
-        /// </summary>
-        private string SanitizeFilename(string name)
-        {
-            var invalid = Path.GetInvalidFileNameChars();
-            var sanitized = string.Join("_", name.Split(invalid, StringSplitOptions.RemoveEmptyEntries));
-            return sanitized.Length > 100 ? sanitized.Substring(0, 100) : sanitized;
-        }
-
-        /// <summary>
-        /// Compute SHA256 hash of data
-        /// </summary>
-        private string ComputeHash(byte[] data)
-        {
-            using var sha256 = SHA256.Create();
-            var hashBytes = sha256.ComputeHash(data);
-            return BitConverter.ToString(hashBytes).Replace("-", "").ToLower();
-        }
-
-        /// <summary>
-        /// Compute hash of file content
-        /// </summary>
-        private async Task<string> ComputeFileHashAsync(string filePath)
-        {
-            using var stream = File.OpenRead(filePath);
-            using var sha256 = SHA256.Create();
-            var hashBytes = await sha256.ComputeHashAsync(stream);
-            return BitConverter.ToString(hashBytes).Replace("-", "").ToLower();
-        }
-
-        /// <summary>
-        /// Format file size for display
-        /// </summary>
-        private string FormatFileSize(long bytes)
-        {
-            string[] sizes = { "B", "KB", "MB", "GB" };
-            double size = bytes;
-            int order = 0;
-
-            while (size >= 1024 && order < sizes.Length - 1)
-            {
-                order++;
-                size /= 1024;
-            }
-
-            return $"{size:0.##} {sizes[order]}";
-        }
-
-        /// <summary>
-        /// Close browser gracefully
-        /// </summary>
-        private async Task CloseBrowserAsync()
-        {
-            if (browser != null)
-            {
-                await browser.CloseAsync();
-                browser = null;
-            }
-        }
+        #endregion
 
         public void Dispose()
         {
-            CloseBrowserAsync().GetAwaiter().GetResult();
+            browser?.Dispose();
         }
     }
 }
