@@ -12,7 +12,6 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using PrivacyLens.Diagnostics;
 using PrivacyLens.Models;
-
 // Extraction libs
 using UglyToad.PdfPig;
 using DocumentFormat.OpenXml.Packaging;
@@ -20,22 +19,13 @@ using DocumentFormat.OpenXml.Wordprocessing;
 using DocumentFormat.OpenXml.Presentation;
 using DocumentFormat.OpenXml.Spreadsheet;
 using A = DocumentFormat.OpenXml.Drawing;
-
-// Azure SDK v2 exception base (needed for 429/Retry-After handling)
+// Azure SDK v2 exception base
 using System.ClientModel; // ClientResultException
-
 // Tokenizer
 using SharpToken;
 
 namespace PrivacyLens.Services
 {
-    /// <summary>
-    /// Orchestrates governance ingestion: extract → chunk (GPT) → embed → save.
-    /// - Reports progress via ImportProgress (console UI shows stage, percent, 429 countdown, etc.)
-    /// - Handles Azure throttling (429/503) with Retry-After and exponential backoff
-    /// - Persists per-document trace files under .diagnostics\traces\*.log
-    /// - Displays panel lifecycle markers from the chunker for granular visibility
-    /// </summary>
     public sealed class GovernanceImportPipeline
     {
         private readonly IChunkingService _chunking;
@@ -43,7 +33,6 @@ namespace PrivacyLens.Services
         private readonly IVectorStore _store;
         private readonly ILogger<GovernanceImportPipeline>? _logger;
 
-        // Diagnostics + throttling knobs
         private readonly bool _verbose;
         private readonly bool _showStageDurations;
         private readonly int _maxRetries;
@@ -52,16 +41,16 @@ namespace PrivacyLens.Services
         private readonly int _jitterMs;
         private readonly int _minDelayBetweenRequestsMs;
 
+        // Optional fixed dimension from config (VectorStore:DesiredEmbeddingDim)
+        private readonly int? _fixedDim;
+
         private string _folderPath = string.Empty;
         public string DefaultFolderPath => _folderPath;
 
-        // Cache tokenizer (o200k_base via gpt-4o)
         private static readonly GptEncoding Tok = GptEncoding.GetEncodingForModel("gpt-4o");
 
         public GovernanceImportPipeline(
-            IChunkingService chunking,
-            IEmbeddingService embeddings,
-            IVectorStore store)
+            IChunkingService chunking, IEmbeddingService embeddings, IVectorStore store)
         {
             _chunking = chunking ?? throw new ArgumentNullException(nameof(chunking));
             _embeddings = embeddings ?? throw new ArgumentNullException(nameof(embeddings));
@@ -78,25 +67,26 @@ namespace PrivacyLens.Services
         {
             _logger = logger;
 
-            // Default folder (support either key path)
             _folderPath = config["Ingestion:DefaultFolderPath"]
-                          ?? config["PrivacyLens:Paths:SourceDocuments"]
-                          ?? _folderPath;
+                ?? config["PrivacyLens:Paths:SourceDocuments"]
+                ?? _folderPath;
+
             if (!string.IsNullOrWhiteSpace(_folderPath) && !Path.IsPathRooted(_folderPath))
                 _folderPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, _folderPath));
 
-            // Diagnostics
-            _verbose = config.GetValue<bool>("Diagnostics:Verbose", false);
-            _showStageDurations = config.GetValue<bool>("Diagnostics:ShowStageDurations", false);
+            var diag = config.GetSection("AzureOpenAI:Diagnostics");
+            _verbose = diag.GetValue("Verbose", false);
+            _showStageDurations = diag.GetValue("ShowStageDurations", false);
 
-            // Retry / throttling
             _maxRetries = config.GetValue<int>("AzureOpenAI:Retry:MaxRetries", 6);
             _baseDelayMs = config.GetValue<int>("AzureOpenAI:Retry:BaseDelayMs", 1500);
             _maxDelayMs = config.GetValue<int>("AzureOpenAI:Retry:MaxDelayMs", 60000);
             _jitterMs = config.GetValue<int>("AzureOpenAI:Retry:JitterMs", 250);
 
-            // Smooth per-request spacing when embedding many chunks
             _minDelayBetweenRequestsMs = config.GetValue<int>("AzureOpenAI:MinDelayBetweenRequestsMs", 0);
+
+            // If enforcing fixed dim in DB, pick it up here for a friendly check
+            _fixedDim = config.GetValue<int?>("VectorStore:DesiredEmbeddingDim");
         }
 
         public void SetFolderPath(string path)
@@ -123,7 +113,6 @@ namespace PrivacyLens.Services
                 var file = files[i];
                 var name = Path.GetFileName(file);
                 progress?.Report(new ImportProgress(i + 1, total, name, "Start"));
-
                 try
                 {
                     await ImportAsync(file, progress, i + 1, total, ct);
@@ -149,7 +138,6 @@ namespace PrivacyLens.Services
 
             var name = Path.GetFileName(filePath);
 
-            // Per-doc trace file
             var safeName = TraceLog.MakeFileSafe(name);
             var tracesDir = Path.Combine(AppContext.BaseDirectory, ".diagnostics", "traces");
             await using var trace = new TraceLog(tracesDir, safeName);
@@ -164,219 +152,101 @@ namespace PrivacyLens.Services
             if (_showStageDurations)
                 progress?.Report(new ImportProgress(current, total, name, "Extract", StageElapsedMs: sw.ElapsedMilliseconds));
 
-            // 2) Chunk with retry/backoff (429-aware) + streaming preview
+            // 2) Chunk
             sw.Restart();
             var approxPromptTok = CountTokens(text);
             progress?.Report(new ImportProgress(current, total, name, "Chunk", $"~{approxPromptTok:N0} prompt tok (est)"));
 
-            // Stream callback → tidy progress line
             Action<int, string> onStream = (chars, preview) =>
             {
-                if (string.IsNullOrEmpty(preview))
-                    return;
-
-                // Panel lifecycle markers
+                if (string.IsNullOrEmpty(preview)) return;
                 if (preview.StartsWith("@panel:"))
                 {
                     var status = preview.Substring("@panel:".Length).Trim();
-
-                    // Suppress noisy informational hints from the chunker in the main UI,
-                    // but keep them in the trace for diagnostics.
-                    if (status.StartsWith("info ", StringComparison.OrdinalIgnoreCase))
-                    {
-                        _ = trace.WriteLineAsync($"CHUNK {status} (chars={chars})");
-                        return;
-                    }
-
-                    // Show start/accepted/done in the UI
-                    progress?.Report(new ImportProgress(current, total, name, "Chunk", status));
-                    _ = trace.WriteLineAsync($"CHUNK {status} (chars={chars})");
+                    if (!status.StartsWith("info ", StringComparison.OrdinalIgnoreCase))
+                        progress?.Report(new ImportProgress(current, total, name, "Chunk", status));
                     return;
                 }
 
-                // Default streaming tail: single-line, de-noised
                 var clean = SanitizeProgress(preview);
-                if (string.IsNullOrEmpty(clean))
-                    return;
-
-                var info = $"out {chars:N0} ch  {clean}";
-                progress?.Report(new ImportProgress(current, total, name, "Chunk", info));
-                _ = trace.WriteLineAsync($"CHUNK stream chars={chars} tail=\"{clean}\"");
+                if (string.IsNullOrEmpty(clean)) return;
+                progress?.Report(new ImportProgress(current, total, name, "Chunk", clean));
             };
 
-            IReadOnlyList<ChunkRecord> chunks = await ExecuteWithRetryAsync(
-                async () => await _chunking.ChunkAsync(text, filePath, onStream, ct),
-                onWait: (seconds, attempt, op) =>
-                    progress?.Report(new ImportProgress(
-                        current, total, name, "429 wait", $"{seconds}s ({op} retry {attempt}/{_maxRetries})")),
-                opName: "chunk",
-                ct: ct,
-                trace: trace);
-
+            IReadOnlyList<ChunkRecord> chunks = await _chunking.ChunkAsync(text, filePath, onStream, ct);
             sw.Stop();
             if (_showStageDurations)
                 progress?.Report(new ImportProgress(current, total, name, "Chunk", StageElapsedMs: sw.ElapsedMilliseconds));
 
-            // 3) Embed + Save
-            sw.Restart();
-            progress?.Report(new ImportProgress(current, total, name, "Embed+Save"));
+            // 3) Embed + Save with verbose details and dimension guard
+            progress?.Report(new ImportProgress(current, total, name, "Embed+Save", $"chunks={chunks.Count}"));
+            var embedSw = Stopwatch.StartNew();
 
             var materialized = new List<ChunkRecord>(chunks.Count);
             for (int i = 0; i < chunks.Count; i++)
             {
                 ct.ThrowIfCancellationRequested();
-
-                // Smooth embedding calls to avoid RPM micro-bursts
                 if (_minDelayBetweenRequestsMs > 0 && i > 0)
                     await Task.Delay(_minDelayBetweenRequestsMs, ct);
 
                 var ch = chunks[i];
+                var tok = CountTokens(ch.Content);
 
-                float[] embedding = await ExecuteWithRetryAsync(
-                    () => _embeddings.EmbedAsync(ch.Content, ct),
-                    onWait: (seconds, attempt, op) =>
-                        progress?.Report(new ImportProgress(
-                            current, total, name, "429 wait", $"{seconds}s ({op} retry {attempt}/{_maxRetries})")),
-                    opName: "embedding",
-                    ct: ct,
-                    trace: trace);
+                var perSw = Stopwatch.StartNew();
+                float[] embedding = await _embeddings.EmbedAsync(ch.Content, ct);
+                perSw.Stop();
+
+                // *** Fixed-dimension guard ***
+                if (_fixedDim.HasValue && embedding.Length != _fixedDim.Value)
+                {
+                    throw new InvalidOperationException(
+                        $"Embedding dimension mismatch: expected {_fixedDim.Value}, got {embedding.Length}. " +
+                        $"Check your embedding deployment (e.g., use 'text-embedding-3-large' for 3072).");
+                }
 
                 materialized.Add(ch with { Embedding = embedding });
+
+                progress?.Report(new ImportProgress(
+                    current, total, name, "Embed",
+                    $"chunk {i + 1}/{chunks.Count} tok={tok} emb_dim={embedding.Length} {perSw.ElapsedMilliseconds}ms"));
             }
 
-            await _store.InitializeAsync(ct);
-            await _store.SaveChunksAsync(materialized, ct);
-
-            sw.Stop();
+            embedSw.Stop();
             if (_showStageDurations)
-                progress?.Report(new ImportProgress(current, total, name, "Embed+Save", StageElapsedMs: sw.ElapsedMilliseconds));
-        }
+                progress?.Report(new ImportProgress(current, total, name, "Embed", StageElapsedMs: embedSw.ElapsedMilliseconds));
 
-        // ---------------------------- Retry/backoff core ----------------------------
-
-        private async Task<T> ExecuteWithRetryAsync<T>(
-            Func<Task<T>> action,
-            Action<int, int, string>? onWait,
-            string opName,
-            CancellationToken ct,
-            TraceLog? trace = null)
-        {
-            int attempt = 0;
-            var delay = TimeSpan.FromMilliseconds(_baseDelayMs);
-            var rng = _jitterMs > 0 ? new Random() : null;
-
-            while (true)
+            // Save with per-row progress if supported
+            var saveSw = Stopwatch.StartNew();
+            if (_store is VectorStore concreteStore)
             {
-                ct.ThrowIfCancellationRequested();
-                try
-                {
-                    return await action();
-                }
-                catch (ClientResultException ex)
-                {
-                    var (status, retryAfterSec) = TryGetStatusAndRetryAfter(ex);
-                    if (status == 429 || status == 503)
+                progress?.Report(new ImportProgress(current, total, name, "Save", $"writing {materialized.Count} chunks..."));
+                int lastShown = 0;
+                await concreteStore.SaveChunksWithProgressAsync(
+                    materialized,
+                    (done, count, msg) =>
                     {
-                        attempt++;
-                        if (attempt > _maxRetries) throw;
-
-                        var wait = retryAfterSec.HasValue
-                            ? TimeSpan.FromSeconds(retryAfterSec.Value)
-                            : delay;
-
-                        if (rng != null)
+                        if (done == count || done - lastShown >= Math.Max(1, count / 20))
                         {
-                            var jitter = rng.Next(-_jitterMs, _jitterMs + 1);
-                            wait = wait + TimeSpan.FromMilliseconds(jitter);
+                            lastShown = done;
+                            progress?.Report(new ImportProgress(current, total, name, "Save",
+                                $"{done}/{count} {msg}"));
                         }
-
-                        var (rt, lt, rr, lr, rid) = TryGetRateHeaders(ex);
-                        var parts = new List<string>();
-                        if (!string.IsNullOrEmpty(rt) && !string.IsNullOrEmpty(lt)) parts.Add($"TPM {rt}/{lt}");
-                        if (!string.IsNullOrEmpty(rr) && !string.IsNullOrEmpty(lr)) parts.Add($"RPM {rr}/{lr}");
-                        if (!string.IsNullOrEmpty(rid)) parts.Add($"rid={rid}");
-                        var hdr = parts.Count > 0 ? ", " + string.Join(" ", parts) : "";
-                        var info = $"{opName}{hdr} retry {attempt}/{_maxRetries} wait={wait.TotalSeconds:N0}s";
-
-                        if (_verbose)
-                            _logger?.LogWarning("{Info}", info);
-
-                        onWait?.Invoke((int)Math.Max(1, wait.TotalSeconds), attempt, $"{opName}{hdr}");
-                        if (trace is not null)
-                            await trace.WriteLineAsync($"THROTTLE {info}");
-
-                        await Task.Delay(wait, ct);
-
-                        // Exponential backoff only if Retry-After not provided
-                        if (!retryAfterSec.HasValue)
-                        {
-                            var nextMs = Math.Min((int)(delay.TotalMilliseconds * 2), _maxDelayMs);
-                            delay = TimeSpan.FromMilliseconds(nextMs);
-                        }
-
-                        continue;
-                    }
-
-                    // non-throttling error
-                    if (trace is not null)
-                        await trace.WriteLineAsync($"ERROR {opName} status={status} ex={ex.Message}");
-                    throw;
-                }
+                    },
+                    ct);
             }
-        }
-
-        private static (int Status, int? RetryAfterSec) TryGetStatusAndRetryAfter(ClientResultException ex)
-        {
-            try
+            else
             {
-                var resp = ex.GetRawResponse();
-                int status = resp?.Status ?? 0;
-                int? retryAfter = null;
+                progress?.Report(new ImportProgress(current, total, name, "Save", $"writing {materialized.Count} chunks..."));
+                await _store.SaveChunksAsync(materialized, ct);
+                progress?.Report(new ImportProgress(current, total, name, "Save", $"saved {materialized.Count} chunks"));
+            }
 
-                if (resp?.Headers.TryGetValue("Retry-After", out var ra) == true)
-                {
-                    if (int.TryParse(ra, out var s)) retryAfter = s;
-                }
-                else
-                {
-                    // Fallback: parse from message like "... retry after 60 seconds ..."
-                    var msg = ex.Message;
-                    var idx = msg.IndexOf("retry after", StringComparison.OrdinalIgnoreCase);
-                    if (idx >= 0)
-                    {
-                        var tail = msg.Substring(idx);
-                        var digits = new string(tail.SkipWhile(c => !char.IsDigit(c)).TakeWhile(char.IsDigit).ToArray());
-                        if (int.TryParse(digits, out var s)) retryAfter = s;
-                    }
-                }
-                return (status, retryAfter);
-            }
-            catch
-            {
-                return (0, null);
-            }
-        }
-
-        private static (string? remainTokens, string? limitTokens, string? remainReq, string? limitReq, string? requestId)
-        TryGetRateHeaders(ClientResultException ex)
-        {
-            try
-            {
-                var resp = ex.GetRawResponse();
-                if (resp is null) return (null, null, null, null, null);
-                resp.Headers.TryGetValue("x-ratelimit-remaining-tokens", out var rt);
-                resp.Headers.TryGetValue("x-ratelimit-limit-tokens", out var lt);
-                resp.Headers.TryGetValue("x-ratelimit-remaining-requests", out var rr);
-                resp.Headers.TryGetValue("x-ratelimit-limit-requests", out var lr);
-                resp.Headers.TryGetValue("apim-request-id", out var rid);
-                return (rt, lt, rr, lr, rid);
-            }
-            catch { return (null, null, null, null, null); }
+            saveSw.Stop();
+            if (_showStageDurations)
+                progress?.Report(new ImportProgress(current, total, name, "Save", StageElapsedMs: saveSw.ElapsedMilliseconds));
         }
 
         private static int CountTokens(string text) => Tok.CountTokens(text);
-
-        // ---------------------------- Extraction helpers ----------------------------
 
         private static bool HasSupportedExtension(string filePath)
         {
@@ -410,7 +280,6 @@ namespace PrivacyLens.Services
             using var doc = WordprocessingDocument.Open(filePath, false);
             var body = doc.MainDocumentPart?.Document?.Body;
             if (body is null) return string.Empty;
-
             var sb = new StringBuilder();
             foreach (var p in body.Descendants<Paragraph>())
             {
@@ -426,7 +295,6 @@ namespace PrivacyLens.Services
             using var pres = PresentationDocument.Open(filePath, false);
             var presPart = pres.PresentationPart;
             if (presPart is null) return string.Empty;
-
             var sb = new StringBuilder();
             foreach (var slidePart in presPart.SlideParts)
             {
@@ -434,7 +302,6 @@ namespace PrivacyLens.Services
                     .Descendants<A.Text>()
                     .Select(t => t.Text)
                     .Where(t => !string.IsNullOrWhiteSpace(t));
-
                 if (texts != null)
                 {
                     foreach (var t in texts) sb.AppendLine(t);
@@ -449,16 +316,13 @@ namespace PrivacyLens.Services
             using var ss = SpreadsheetDocument.Open(filePath, false);
             var wbPart = ss.WorkbookPart;
             if (wbPart is null) return string.Empty;
-
             var sb = new StringBuilder();
             var sst = wbPart.SharedStringTablePart?.SharedStringTable;
             var sheets = wbPart.Workbook.Sheets?.OfType<Sheet>() ?? Enumerable.Empty<Sheet>();
-
             foreach (var sheet in sheets)
             {
                 var relId = sheet.Id?.Value;
                 if (string.IsNullOrEmpty(relId)) continue;
-
                 var wsPart = (WorksheetPart)wbPart.GetPartById(relId);
                 var sheetData = wsPart.Worksheet.GetFirstChild<SheetData>();
                 if (sheetData is null) continue;
@@ -469,7 +333,6 @@ namespace PrivacyLens.Services
                     var cellValues = new List<string>();
                     foreach (var cell in row.Elements<Cell>())
                         cellValues.Add(GetCellDisplayString(cell, wbPart, sst));
-
                     if (cellValues.Count > 0)
                         sb.AppendLine(string.Join('\t', cellValues));
                 }
@@ -502,31 +365,20 @@ namespace PrivacyLens.Services
             return cell.CellValue?.InnerText ?? string.Empty;
         }
 
-        // ---------------------------- Utilities ----------------------------
-
         private static string SanitizeProgress(string s)
         {
             if (string.IsNullOrEmpty(s)) return string.Empty;
-
-            // Replace control chars with space (keep the line one-liner), then collapse whitespace
             var sb = new StringBuilder(s.Length);
             foreach (var c in s)
             {
                 if (char.IsControl(c))
                 {
                     if (c == '\n' || c == '\r' || c == '\t') sb.Append(' ');
-                    // else drop other control chars
                 }
-                else
-                {
-                    sb.Append(c);
-                }
+                else sb.Append(c);
             }
-
             var oneLine = sb.ToString();
             var collapsed = Regex.Replace(oneLine, @"\s+", " ").Trim();
-
-            // Clip very long tails just in case
             const int max = 200;
             return (collapsed.Length <= max) ? collapsed : collapsed.Substring(0, max) + " …";
         }

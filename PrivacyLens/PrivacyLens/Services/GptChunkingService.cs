@@ -23,7 +23,13 @@ namespace PrivacyLens.Services
     /// - Each panel is sent as its own Chat call (streamed), then results are stitched (dedupe overlap).
     /// - A pacing rule spaces calls to stay under configured Tokens-per-Minute (TPM).
     /// - Emits panel lifecycle markers via onStream: "@panel:config", "@panel:start/accepted/done".
-    /// - Handles GPT‑5 models that require 'max_completion_tokens' (avoids sending legacy 'max_tokens').
+    /// - Handles GPT-5 models that require 'max_completion_tokens' (avoids sending legacy 'max_tokens').
+    /// 
+    /// This version reads model settings from:
+    ///   AzureOpenAI:ChunkingAgent:*  (Endpoint/ApiKey/ApiVersion/ChatDeployment/RequireMaxCompletionTokens)
+    /// and shared settings from:
+    ///   AzureOpenAI:*                 (EmbeddingDeployment, Retry, Diagnostics, Chunking (panelization knobs))
+    /// with fallbacks to legacy root sections when present.
     /// </summary>
     public sealed class GptChunkingService : IChunkingService
     {
@@ -35,9 +41,9 @@ namespace PrivacyLens.Services
         private readonly int _streamUpdateIntervalMs;
         private readonly string? _promptDumpDir;
         private readonly string? _streamDumpDir;
-        private readonly bool _emitPanelInfo; // NEW: console noise control
+        private readonly bool _emitPanelInfo; // reduce console noise by default
 
-        // Panelization knobs (from config: "Chunking")
+        // Panelization knobs (from AzureOpenAI:Chunking)
         private readonly bool _enablePanelization;
         private readonly int _targetPanelTokens;
         private readonly int _overlapTokens;
@@ -46,43 +52,67 @@ namespace PrivacyLens.Services
         private readonly int _singleWindowBudget;
 
         // Token contract knobs
-        private readonly bool _requireMaxCompletionTokens; // set true for GPT‑5
-
+        private readonly bool _requireMaxCompletionTokens; // GPT-5 models want MaxCompletionTokens (no legacy)
         private bool _loggedConfigOnce;
 
-        // Tokenizer (o200k_base via gpt-4o); adjust model name here if you deploy a different chat model
+        // Tokenizer (o200k_base via gpt-4o); adjust if you deploy a different chat model
         private static readonly GptEncoding Enc = GptEncoding.GetEncodingForModel("gpt-4o");
 
         public GptChunkingService(IConfiguration config)
         {
-            // Azure client
-            var section = config.GetSection("AzureOpenAI");
-            var endpoint = new Uri(section["Endpoint"] ?? throw new InvalidOperationException("AzureOpenAI:Endpoint is missing"));
-            var apiKey = section["ApiKey"] ?? throw new InvalidOperationException("AzureOpenAI:ApiKey is missing");
-            var deployment = section["ChatDeployment"] ?? throw new InvalidOperationException("AzureOpenAI:ChatDeployment is missing");
-            var azureClient = new AzureOpenAIClient(endpoint, new AzureKeyCredential(apiKey));
+            // --- Resolve Azure OpenAI sections ---
+            var aoai = config.GetSection("AzureOpenAI");
+            if (!aoai.Exists())
+                throw new InvalidOperationException("Missing configuration section 'AzureOpenAI'.");
+
+            // Prefer the specialized ChunkingAgent (gpt-4.1-mini in your case); fall back to shared defaults
+            var agent = aoai.GetSection("ChunkingAgent");
+            string endpointStr =
+                agent["Endpoint"]
+                ?? aoai["Endpoint"]
+                ?? throw new InvalidOperationException("AzureOpenAI:Endpoint is missing");
+
+            string apiKey =
+                agent["ApiKey"]
+                ?? aoai["ApiKey"]
+                ?? throw new InvalidOperationException("AzureOpenAI:ApiKey is missing");
+
+            string deployment =
+                agent["ChatDeployment"]
+                ?? aoai["ChatDeployment"]
+                ?? throw new InvalidOperationException("AzureOpenAI:ChatDeployment is missing");
+
+            // Optional API version (not strictly required by the .NET v2 client)
+            string? apiVersion =
+                agent["ApiVersion"] ?? aoai["ApiVersion"]; // reserved if you later need custom options
+
+            // Build client bound to the agent endpoint
+            var azureClient = new AzureOpenAIClient(new Uri(endpointStr), new AzureKeyCredential(apiKey));
             _chat = azureClient.GetChatClient(deployment);
 
-            // Diagnostics
-            var diag = config.GetSection("Diagnostics");
-            _streamEnabled = diag.GetValue("StreamChunkingOutput", true);
-            _streamPreviewChars = diag.GetValue("StreamPreviewChars", 120);
-            _streamUpdateIntervalMs = diag.GetValue("StreamUpdateIntervalMs", 250);
-            _promptDumpDir = diag["PromptDumpDir"];
-            _streamDumpDir = diag["StreamDumpDir"];
-            _emitPanelInfo = diag.GetValue("EmitPanelInfo", false); // default false to reduce UI noise
+            // --- Diagnostics (prefer AzureOpenAI:Diagnostics; fallback to legacy root) ---
+            var diag = aoai.GetSection("Diagnostics");
+            _streamEnabled = diag.GetValue("StreamChunkingOutput", config.GetValue("Diagnostics:StreamChunkingOutput", true));
+            _streamPreviewChars = diag.GetValue("StreamPreviewChars", config.GetValue("Diagnostics:StreamPreviewChars", 120));
+            _streamUpdateIntervalMs = diag.GetValue("StreamUpdateIntervalMs", config.GetValue("Diagnostics:StreamUpdateIntervalMs", 250));
+            _promptDumpDir = diag["PromptDumpDir"] ?? config["Diagnostics:PromptDumpDir"];
+            _streamDumpDir = diag["StreamDumpDir"] ?? config["Diagnostics:StreamDumpDir"];
+            _emitPanelInfo = diag.GetValue("EmitPanelInfo", config.GetValue("Diagnostics:EmitPanelInfo", false));
 
-            // Chunking config
-            var chunk = config.GetSection("Chunking");
-            _enablePanelization = chunk.GetValue("EnablePanelization", true);
-            _targetPanelTokens = chunk.GetValue("TargetPanelTokens", 3000);
-            _overlapTokens = chunk.GetValue("OverlapTokens", 400);
-            _maxOutputTokens = chunk.GetValue("MaxOutputTokens", 700);
-            _tpm = chunk.GetValue("Tpm", 50_000);
-            _singleWindowBudget = chunk.GetValue("SingleWindowBudget", 3500);
+            // --- Panelization knobs (prefer AzureOpenAI:Chunking; fallback to legacy root "Chunking") ---
+            var chunk = aoai.GetSection("Chunking");
+            _enablePanelization = chunk.GetValue("EnablePanelization", config.GetValue("Chunking:EnablePanelization", true));
+            _targetPanelTokens = chunk.GetValue("TargetPanelTokens", config.GetValue("Chunking:TargetPanelTokens", 3000));
+            _overlapTokens = chunk.GetValue("OverlapTokens", config.GetValue("Chunking:OverlapTokens", 400));
+            _maxOutputTokens = chunk.GetValue("MaxOutputTokens", config.GetValue("Chunking:MaxOutputTokens", 700));
+            _tpm = chunk.GetValue("Tpm", config.GetValue("Chunking:Tpm", 50_000));
+            _singleWindowBudget = chunk.GetValue("SingleWindowBudget", config.GetValue("Chunking:SingleWindowBudget", 3500));
 
-            // Models that reject 'max_tokens' (eg. GPT‑5) should force 'max_completion_tokens'.
-            _requireMaxCompletionTokens = section.GetValue("RequireMaxCompletionTokens", true);
+            // --- Token contract behavior (prefer agent override; fallback to shared AzureOpenAI default; legacy default = true) ---
+            _requireMaxCompletionTokens =
+                agent.GetValue("RequireMaxCompletionTokens",
+                    aoai.GetValue("RequireMaxCompletionTokens",
+                        true));
         }
 
         public async Task<IReadOnlyList<ChunkRecord>> ChunkAsync(
@@ -94,42 +124,38 @@ namespace PrivacyLens.Services
             if (!_loggedConfigOnce)
             {
                 _loggedConfigOnce = true;
-                // Show effective knobs once per process to verify config load (trace or verbose UI)
                 onStream?.Invoke(0, $"@panel:config target={_targetPanelTokens} overlap={_overlapTokens} maxOut={_maxOutputTokens} tpm={_tpm} singleWin={_singleWindowBudget} requireMCT={_requireMaxCompletionTokens}");
             }
 
             int totalTokens = CountTokens(text);
 
-            // If panelization is disabled or small enough, single-window path
+            // Single-window path if panelization disabled or small enough
             if (!_enablePanelization || totalTokens <= _singleWindowBudget)
                 return await ChunkSingleWindowAsync(text, documentPath, onStream, ct);
 
-            // TOKEN-BASED windows: slice by tokens irrespective of newlines
+            // Token-based windows irrespective of newlines
             var panels = BuildTokenPanels(text, _targetPanelTokens, _overlapTokens).ToList();
             var all = new List<ChunkRecord>(capacity: panels.Count * 3);
 
-            // Pacing: ensure (prompt + maxOut) fits TPM to avoid pre-generation 429
+            // Pacing to avoid pre-generation 429s
             var baseSpacing = TimeSpan.FromSeconds(
                 Math.Ceiling(((_targetPanelTokens + _maxOutputTokens) / (double)_tpm) * 60.0));
-            var minSpacing = baseSpacing + TimeSpan.FromSeconds(1.0); // small cushion
-
+            var minSpacing = baseSpacing + TimeSpan.FromSeconds(1.0);
             DateTimeOffset nextEarliest = DateTimeOffset.UtcNow;
 
             for (int i = 0; i < panels.Count; i++)
             {
                 ct.ThrowIfCancellationRequested();
 
-                // scheduled pacing to avoid 429 prior to streaming
                 var now = DateTimeOffset.UtcNow;
-                if (now < nextEarliest)
-                    await Task.Delay(nextEarliest - now, ct);
+                if (now < nextEarliest) await Task.Delay(nextEarliest - now, ct);
 
                 var pane = panels[i];
 
                 // lifecycle marker: starting panel (token count known exactly)
                 onStream?.Invoke(0, $"@panel:start {i + 1}/{panels.Count} in={pane.TokenCount} out={_maxOutputTokens}");
 
-                // messages per panel (strictly window-local)
+                // messages per panel
                 var messages = new List<ChatMessage>
                 {
                     new SystemChatMessage(
@@ -139,11 +165,10 @@ namespace PrivacyLens.Services
                     new UserChatMessage($"[Window {i+1}/{panels.Count}] Begin window text below:\n{pane.Text}\n[End of window]")
                 };
 
-                // Build options WITHOUT setting a legacy 'max_tokens' on GPT‑5.
                 var options = new ChatCompletionOptions();
                 TrySetMaxTokens(options, _maxOutputTokens, onStream);
 
-                // Optional prompt dump for troubleshooting
+                // Optional prompt dump
                 if (!string.IsNullOrWhiteSpace(_promptDumpDir))
                 {
                     Directory.CreateDirectory(_promptDumpDir!);
@@ -157,14 +182,14 @@ namespace PrivacyLens.Services
                         utc = DateTime.UtcNow,
                         messages = new object[]
                         {
-                            new { role = "system", content = "You split THIS WINDOW ONLY into coherent chunks (~400–600 tokens). Return ONLY the chunk texts separated by the exact line '---CHUNK---'."},
+                            new { role = "system", content = "You split THIS WINDOW ONLY into coherent chunks (~400–600 tokens). Return ONLY the chunk texts separated by the exact line '---CHUNK---'." },
                             new { role = "user", content = $"[Window {i+1}/{panels.Count}] Begin text:\n{pane.Text}\n[End]" }
                         }
                     };
                     await File.WriteAllTextAsync(path, JsonSerializer.Serialize(dto, new JsonSerializerOptions { WriteIndented = true }), ct);
                 }
 
-                // Streaming call
+                // streaming
                 var sb = new StringBuilder(4096);
                 var lastTick = Environment.TickCount;
                 bool accepted = false;
@@ -183,7 +208,6 @@ namespace PrivacyLens.Services
                     }
 
                     var stream = _chat.CompleteChatStreamingAsync(messages, options, ct);
-
                     await foreach (var update in stream.WithCancellation(ct))
                     {
                         foreach (var part in update.ContentUpdate)
@@ -206,14 +230,12 @@ namespace PrivacyLens.Services
                             if (nowTick - lastTick >= _streamUpdateIntervalMs)
                             {
                                 lastTick = nowTick;
-                                // Keep sending a tail; pipeline will convert this to "+chars" progress
                                 onStream.Invoke(sb.Length, $"[p {i + 1}/{panels.Count}] {Tail(sb, _streamPreviewChars)}");
                                 if (dump is not null) await dump.FlushAsync();
                             }
                         }
                     }
 
-                    // final UI/dump update
                     onStream?.Invoke(sb.Length, $"@panel:done {i + 1}/{panels.Count} chars={sb.Length}");
                     if (dump is not null)
                     {
@@ -227,7 +249,6 @@ namespace PrivacyLens.Services
                     if (dump is not null) await dump.DisposeAsync();
                 }
 
-                // Parse chunks and stitch into accumulator (dedupe overlap)
                 var panelChunks = ParseChunks(sb.ToString(), documentPath);
                 StitchInPlace(all, panelChunks);
 
@@ -242,7 +263,7 @@ namespace PrivacyLens.Services
             return all;
         }
 
-        // === Single-window path (kept) ===
+        // === Single-window path ===
         private async Task<IReadOnlyList<ChunkRecord>> ChunkSingleWindowAsync(
             string text, string? documentPath, Action<int, string>? onStream, CancellationToken ct)
         {
@@ -253,26 +274,6 @@ namespace PrivacyLens.Services
                     "Return ONLY the chunks separated by the exact line '---CHUNK---' (no numbering, no extra text)."),
                 new UserChatMessage(text)
             };
-
-            // Optional prompt dump
-            if (!string.IsNullOrWhiteSpace(_promptDumpDir))
-            {
-                Directory.CreateDirectory(_promptDumpDir!);
-                var safe = TraceLog.MakeFileSafe(documentPath ?? $"doc-{DateTime.UtcNow:yyyyMMdd-HHmmss}");
-                var path = Path.Combine(_promptDumpDir!, $"{safe}.prompt.json");
-                var dto = new
-                {
-                    kind = "chunk_prompt",
-                    doc = documentPath,
-                    utc = DateTime.UtcNow,
-                    messages = messages.Select(m => new
-                    {
-                        role = m switch { SystemChatMessage => "system", UserChatMessage => "user", _ => "other" },
-                        content = m.Content?.FirstOrDefault()?.Text
-                    })
-                };
-                await File.WriteAllTextAsync(path, JsonSerializer.Serialize(dto, new JsonSerializerOptions { WriteIndented = true }), ct);
-            }
 
             var options = new ChatCompletionOptions();
             TrySetMaxTokens(options, _maxOutputTokens, onStream);
@@ -340,18 +341,14 @@ namespace PrivacyLens.Services
             return ParseChunks(sb.ToString(), documentPath);
         }
 
-        // === TOKEN-BASED panels (List<int> implementation) ===
-
+        // --- Token panels ---
         private sealed record TokenPanel(string Text, int TokenCount);
 
         private static IEnumerable<TokenPanel> BuildTokenPanels(string text, int targetTokens, int overlapTokens)
         {
-            // Encode entire doc to tokens once (SharpToken returns List<int>)
             List<int> tokens = Enc.Encode(text);
-            if (tokens.Count == 0)
-                yield break;
+            if (tokens.Count == 0) yield break;
 
-            // Guards
             if (targetTokens <= 0) targetTokens = 1000;
             if (overlapTokens < 0) overlapTokens = 0;
             if (overlapTokens >= targetTokens) overlapTokens = Math.Max(0, targetTokens / 5);
@@ -360,31 +357,21 @@ namespace PrivacyLens.Services
             while (start < tokens.Count)
             {
                 int end = Math.Min(start + targetTokens, tokens.Count);
-
-                // slice as List<int> (List has Count, GetRange)
                 List<int> slice = tokens.GetRange(start, end - start);
-
                 string panelText = Enc.Decode(slice);
                 yield return new TokenPanel(panelText, slice.Count);
-
-                if (end == tokens.Count)
-                    break;
-
-                // carry overlap forward
+                if (end == tokens.Count) break;
                 start = Math.Max(0, end - overlapTokens);
             }
         }
 
-        // --- Token limit helper (handles SDK differences) ---
-
         /// <summary>
-        /// Tries to set a completion/output token cap on ChatCompletionOptions in a way that
-        /// works across SDK versions and model families.
-        /// Returns true if we set a value; false if we deliberately left it unset to avoid 400s.
+        /// Tries to set a completion/output token cap on ChatCompletionOptions in a way
+        /// that works across SDK versions and model families.
         /// </summary>
         private bool TrySetMaxTokens(ChatCompletionOptions options, int? tokens, Action<int, string>? onStream)
         {
-            // Prefer a property named "MaxCompletionTokens" if present (newer SDKs / GPT‑5)
+            // Prefer "MaxCompletionTokens" if present (newer SDKs / GPT-5)
             var t = options.GetType();
             var pNew = t.GetProperty("MaxCompletionTokens");
             if (pNew is not null)
@@ -394,21 +381,19 @@ namespace PrivacyLens.Services
                 return true;
             }
 
-            // Older SDKs use MaxOutputTokenCount; BUT GPT‑5 rejects its wire mapping ('max_tokens').
+            // Older SDKs: MaxOutputTokenCount; GPT-5 may reject its wire mapping ('max_tokens')
             if (_requireMaxCompletionTokens)
             {
-                if (_emitPanelInfo) onStream?.Invoke(0, "@panel:info omitting max tokens (GPT‑5 + SDK lacks MaxCompletionTokens)");
+                if (_emitPanelInfo) onStream?.Invoke(0, "@panel:info omitting max tokens (GPT-5 + SDK lacks MaxCompletionTokens)");
                 return false; // leave unset to avoid 400 unsupported_parameter
             }
 
-            // It seems safe to use the legacy property for classic GPT‑4o/Turbo/etc.
             options.MaxOutputTokenCount = tokens;
             if (_emitPanelInfo) onStream?.Invoke(0, "@panel:info using MaxOutputTokenCount");
             return true;
         }
 
         // === Helpers ===
-
         private static int CountTokens(string s) => Enc.CountTokens(s);
 
         private static List<ChunkRecord> ParseChunks(string content, string? documentPath)
@@ -438,9 +423,7 @@ namespace PrivacyLens.Services
                 var na = Normalize(a);
                 var nb = Normalize(b);
                 if (na.Length == 0 || nb.Length == 0) return na.Length == nb.Length;
-                // contain or simple LCS ~85% heuristic
-                return na.Contains(nb) || nb.Contains(na) ||
-                       (2.0 * Lcs(na, nb) / Math.Max(na.Length, nb.Length)) >= 0.85;
+                return na.Contains(nb) || nb.Contains(na) || (2.0 * Lcs(na, nb) / Math.Max(na.Length, nb.Length)) >= 0.85;
             }
 
             static int Lcs(string a, string b)
