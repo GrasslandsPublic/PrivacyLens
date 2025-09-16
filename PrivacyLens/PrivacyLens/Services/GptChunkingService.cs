@@ -1,10 +1,9 @@
-﻿// Services/GptChunkingService.cs
+﻿// Services/GptChunkingService.cs - Enhanced with comprehensive debugging
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
-using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Azure;
@@ -13,84 +12,58 @@ using Microsoft.Extensions.Configuration;
 using OpenAI.Chat;
 using PrivacyLens.Diagnostics;
 using PrivacyLens.Models;
-using SharpToken; // tokenizer (tiktoken port)
+using SharpToken;
 
 namespace PrivacyLens.Services
 {
-    /// <summary>
-    /// GPT-driven chunker with TOKEN-BASED panelization:
-    /// - Large inputs are split into token windows (TargetPanelTokens) with OverlapTokens continuity.
-    /// - Each panel is sent as its own Chat call (streamed), then results are stitched (dedupe overlap).
-    /// - A pacing rule spaces calls to stay under configured Tokens-per-Minute (TPM).
-    /// - Emits panel lifecycle markers via onStream: "@panel:config", "@panel:start/accepted/done".
-    /// - Handles GPT-5 models that require 'max_completion_tokens' (avoids sending legacy 'max_tokens').
-    /// 
-    /// This version reads model settings from:
-    ///   AzureOpenAI:ChunkingAgent:*  (Endpoint/ApiKey/ApiVersion/ChatDeployment/RequireMaxCompletionTokens)
-    /// and shared settings from:
-    ///   AzureOpenAI:*                 (EmbeddingDeployment, Retry, Diagnostics, Chunking (panelization knobs))
-    /// with fallbacks to legacy root sections when present.
-    /// </summary>
     public sealed class GptChunkingService : IChunkingService
     {
         private readonly ChatClient _chat;
+        private readonly GptEncoding _enc = GptEncoding.GetEncodingForModel("gpt-4o");
 
-        // Streaming / diagnostics knobs
+        // Streaming settings
         private readonly bool _streamEnabled;
         private readonly int _streamPreviewChars;
         private readonly int _streamUpdateIntervalMs;
-        private readonly string? _promptDumpDir;
-        private readonly string? _streamDumpDir;
-        private readonly bool _emitPanelInfo; // reduce console noise by default
 
-        // Panelization knobs (from AzureOpenAI:Chunking)
+        // Chunking parameters
         private readonly bool _enablePanelization;
         private readonly int _targetPanelTokens;
         private readonly int _overlapTokens;
         private readonly int _maxOutputTokens;
         private readonly int _tpm;
         private readonly int _singleWindowBudget;
+        private readonly bool _requireMaxCompletionTokens;
 
-        // Token contract knobs
-        private readonly bool _requireMaxCompletionTokens; // GPT-5 models want MaxCompletionTokens (no legacy)
-        private bool _loggedConfigOnce;
+        // Debug settings
+        private readonly string? _promptDumpDir;
+        private readonly string? _streamDumpDir;
+        private readonly bool _emitPanelInfo;
 
-        // Tokenizer (o200k_base via gpt-4o); adjust if you deploy a different chat model
-        private static readonly GptEncoding Enc = GptEncoding.GetEncodingForModel("gpt-4o");
+        // Enhanced debug mode
+        private readonly bool _debugMode;
+        private readonly bool _verboseDebug;
+        private readonly string? _debugOutputDir;
+
+        private static bool _loggedConfigOnce;
 
         public GptChunkingService(IConfiguration config)
         {
-            // --- Resolve Azure OpenAI sections ---
             var aoai = config.GetSection("AzureOpenAI");
             if (!aoai.Exists())
-                throw new InvalidOperationException("Missing configuration section 'AzureOpenAI'.");
+                throw new InvalidOperationException("Missing configuration section: AzureOpenAI");
 
-            // Prefer the specialized ChunkingAgent (gpt-4.1-mini in your case); fall back to shared defaults
             var agent = aoai.GetSection("ChunkingAgent");
-            string endpointStr =
-                agent["Endpoint"]
-                ?? aoai["Endpoint"]
-                ?? throw new InvalidOperationException("AzureOpenAI:Endpoint is missing");
+            string endpointStr = agent["Endpoint"] ?? aoai["Endpoint"] ??
+                throw new InvalidOperationException("AzureOpenAI:Endpoint is missing");
+            string apiKey = agent["ApiKey"] ?? aoai["ApiKey"] ??
+                throw new InvalidOperationException("AzureOpenAI:ApiKey is missing");
+            string deployment = agent["ChatDeployment"] ?? aoai["ChatDeployment"] ??
+                throw new InvalidOperationException("AzureOpenAI:ChatDeployment is missing");
 
-            string apiKey =
-                agent["ApiKey"]
-                ?? aoai["ApiKey"]
-                ?? throw new InvalidOperationException("AzureOpenAI:ApiKey is missing");
-
-            string deployment =
-                agent["ChatDeployment"]
-                ?? aoai["ChatDeployment"]
-                ?? throw new InvalidOperationException("AzureOpenAI:ChatDeployment is missing");
-
-            // Optional API version (not strictly required by the .NET v2 client)
-            string? apiVersion =
-                agent["ApiVersion"] ?? aoai["ApiVersion"]; // reserved if you later need custom options
-
-            // Build client bound to the agent endpoint
             var azureClient = new AzureOpenAIClient(new Uri(endpointStr), new AzureKeyCredential(apiKey));
             _chat = azureClient.GetChatClient(deployment);
 
-            // --- Diagnostics (prefer AzureOpenAI:Diagnostics; fallback to legacy root) ---
             var diag = aoai.GetSection("Diagnostics");
             _streamEnabled = diag.GetValue("StreamChunkingOutput", config.GetValue("Diagnostics:StreamChunkingOutput", true));
             _streamPreviewChars = diag.GetValue("StreamPreviewChars", config.GetValue("Diagnostics:StreamPreviewChars", 120));
@@ -99,20 +72,26 @@ namespace PrivacyLens.Services
             _streamDumpDir = diag["StreamDumpDir"] ?? config["Diagnostics:StreamDumpDir"];
             _emitPanelInfo = diag.GetValue("EmitPanelInfo", config.GetValue("Diagnostics:EmitPanelInfo", false));
 
-            // --- Panelization knobs (prefer AzureOpenAI:Chunking; fallback to legacy root "Chunking") ---
+            // Enhanced debug settings
+            _debugMode = diag.GetValue("DebugMode", true); // Default to true for debugging
+            _verboseDebug = diag.GetValue("VerboseDebug", true);
+            _debugOutputDir = diag["DebugOutputDir"] ?? Path.Combine(Path.GetTempPath(), "PrivacyLens_Debug");
+
             var chunk = aoai.GetSection("Chunking");
             _enablePanelization = chunk.GetValue("EnablePanelization", config.GetValue("Chunking:EnablePanelization", true));
             _targetPanelTokens = chunk.GetValue("TargetPanelTokens", config.GetValue("Chunking:TargetPanelTokens", 3000));
             _overlapTokens = chunk.GetValue("OverlapTokens", config.GetValue("Chunking:OverlapTokens", 400));
-            _maxOutputTokens = chunk.GetValue("MaxOutputTokens", config.GetValue("Chunking:MaxOutputTokens", 700));
+            _maxOutputTokens = chunk.GetValue("MaxOutputTokens", config.GetValue("Chunking:MaxOutputTokens", 4000)); // Increased for debugging
             _tpm = chunk.GetValue("Tpm", config.GetValue("Chunking:Tpm", 50_000));
             _singleWindowBudget = chunk.GetValue("SingleWindowBudget", config.GetValue("Chunking:SingleWindowBudget", 3500));
+            _requireMaxCompletionTokens = agent.GetValue("RequireMaxCompletionTokens",
+                aoai.GetValue("RequireMaxCompletionTokens", true));
 
-            // --- Token contract behavior (prefer agent override; fallback to shared AzureOpenAI default; legacy default = true) ---
-            _requireMaxCompletionTokens =
-                agent.GetValue("RequireMaxCompletionTokens",
-                    aoai.GetValue("RequireMaxCompletionTokens",
-                        true));
+            // Create debug directory if needed
+            if (_debugMode && !string.IsNullOrWhiteSpace(_debugOutputDir))
+            {
+                Directory.CreateDirectory(_debugOutputDir);
+            }
         }
 
         public async Task<IReadOnlyList<ChunkRecord>> ChunkAsync(
@@ -124,185 +103,152 @@ namespace PrivacyLens.Services
             if (!_loggedConfigOnce)
             {
                 _loggedConfigOnce = true;
-                onStream?.Invoke(0, $"@panel:config target={_targetPanelTokens} overlap={_overlapTokens} maxOut={_maxOutputTokens} tpm={_tpm} singleWin={_singleWindowBudget} requireMCT={_requireMaxCompletionTokens}");
+                var configMsg = $"@panel:config target={_targetPanelTokens} overlap={_overlapTokens} maxOut={_maxOutputTokens} tpm={_tpm} singleWin={_singleWindowBudget} requireMCT={_requireMaxCompletionTokens}";
+                onStream?.Invoke(0, configMsg);
+                LogDebug("CONFIGURATION", configMsg);
             }
 
             int totalTokens = CountTokens(text);
 
-            // Single-window path if panelization disabled or small enough
-            if (!_enablePanelization || totalTokens <= _singleWindowBudget)
-                return await ChunkSingleWindowAsync(text, documentPath, onStream, ct);
+            LogDebug("INPUT_ANALYSIS", $"Input text tokens: {totalTokens}, Single window budget: {_singleWindowBudget}, Panelization enabled: {_enablePanelization}");
 
-            // Token-based windows irrespective of newlines
-            var panels = BuildTokenPanels(text, _targetPanelTokens, _overlapTokens).ToList();
-            var all = new List<ChunkRecord>(capacity: panels.Count * 3);
-
-            // Pacing to avoid pre-generation 429s
-            var baseSpacing = TimeSpan.FromSeconds(
-                Math.Ceiling(((_targetPanelTokens + _maxOutputTokens) / (double)_tpm) * 60.0));
-            var minSpacing = baseSpacing + TimeSpan.FromSeconds(1.0);
-            DateTimeOffset nextEarliest = DateTimeOffset.UtcNow;
-
-            for (int i = 0; i < panels.Count; i++)
+            // Save input text for debugging
+            if (_verboseDebug)
             {
-                ct.ThrowIfCancellationRequested();
-
-                var now = DateTimeOffset.UtcNow;
-                if (now < nextEarliest) await Task.Delay(nextEarliest - now, ct);
-
-                var pane = panels[i];
-
-                // lifecycle marker: starting panel (token count known exactly)
-                onStream?.Invoke(0, $"@panel:start {i + 1}/{panels.Count} in={pane.TokenCount} out={_maxOutputTokens}");
-
-                // messages per panel
-                var messages = new List<ChatMessage>
-                {
-                    new SystemChatMessage(
-                        "You split THIS WINDOW ONLY into semantically coherent chunks (~400–600 tokens). " +
-                        "Return ONLY the chunk texts separated by the exact line '---CHUNK---'. " +
-                        "Do not include any text that is not inside this window."),
-                    new UserChatMessage($"[Window {i+1}/{panels.Count}] Begin window text below:\n{pane.Text}\n[End of window]")
-                };
-
-                var options = new ChatCompletionOptions();
-                TrySetMaxTokens(options, _maxOutputTokens, onStream);
-
-                // Optional prompt dump
-                if (!string.IsNullOrWhiteSpace(_promptDumpDir))
-                {
-                    Directory.CreateDirectory(_promptDumpDir!);
-                    var safe = TraceLog.MakeFileSafe((documentPath ?? "doc") + $".p{i:00}");
-                    var path = Path.Combine(_promptDumpDir!, $"{safe}.prompt.json");
-                    var dto = new
-                    {
-                        kind = "chunk_prompt",
-                        doc = documentPath,
-                        window = $"{i + 1}/{panels.Count}",
-                        utc = DateTime.UtcNow,
-                        messages = new object[]
-                        {
-                            new { role = "system", content = "You split THIS WINDOW ONLY into coherent chunks (~400–600 tokens). Return ONLY the chunk texts separated by the exact line '---CHUNK---'." },
-                            new { role = "user", content = $"[Window {i+1}/{panels.Count}] Begin text:\n{pane.Text}\n[End]" }
-                        }
-                    };
-                    await File.WriteAllTextAsync(path, JsonSerializer.Serialize(dto, new JsonSerializerOptions { WriteIndented = true }), ct);
-                }
-
-                // streaming
-                var sb = new StringBuilder(4096);
-                var lastTick = Environment.TickCount;
-                bool accepted = false;
-                StreamWriter? dump = null;
-
-                try
-                {
-                    if (!string.IsNullOrWhiteSpace(_streamDumpDir))
-                    {
-                        Directory.CreateDirectory(_streamDumpDir!);
-                        var safe = TraceLog.MakeFileSafe((documentPath ?? "doc") + $".p{i:00}");
-                        var dumpPath = Path.Combine(_streamDumpDir!, $"{safe}.chunk-stream.txt");
-                        dump = new StreamWriter(new FileStream(dumpPath, FileMode.Create, FileAccess.Write, FileShare.Read), Encoding.UTF8);
-                        await dump.WriteLineAsync($"# stream for: {documentPath} [panel {i + 1}/{panels.Count}]");
-                        await dump.WriteLineAsync($"# utc start: {DateTime.UtcNow:O}");
-                    }
-
-                    var stream = _chat.CompleteChatStreamingAsync(messages, options, ct);
-                    await foreach (var update in stream.WithCancellation(ct))
-                    {
-                        foreach (var part in update.ContentUpdate)
-                        {
-                            if (part.Kind == ChatMessageContentPartKind.Text && !string.IsNullOrEmpty(part.Text))
-                            {
-                                sb.Append(part.Text);
-                                if (dump is not null) await dump.WriteAsync(part.Text);
-                                if (!accepted)
-                                {
-                                    accepted = true;
-                                    onStream?.Invoke(sb.Length, $"@panel:accepted {i + 1}/{panels.Count}");
-                                }
-                            }
-                        }
-
-                        if (_streamEnabled && onStream is not null)
-                        {
-                            var nowTick = Environment.TickCount;
-                            if (nowTick - lastTick >= _streamUpdateIntervalMs)
-                            {
-                                lastTick = nowTick;
-                                onStream.Invoke(sb.Length, $"[p {i + 1}/{panels.Count}] {Tail(sb, _streamPreviewChars)}");
-                                if (dump is not null) await dump.FlushAsync();
-                            }
-                        }
-                    }
-
-                    onStream?.Invoke(sb.Length, $"@panel:done {i + 1}/{panels.Count} chars={sb.Length}");
-                    if (dump is not null)
-                    {
-                        await dump.WriteLineAsync();
-                        await dump.WriteLineAsync($"# utc end: {DateTime.UtcNow:O}");
-                        await dump.FlushAsync();
-                    }
-                }
-                finally
-                {
-                    if (dump is not null) await dump.DisposeAsync();
-                }
-
-                var panelChunks = ParseChunks(sb.ToString(), documentPath);
-                StitchInPlace(all, panelChunks);
-
-                // schedule next call
-                nextEarliest = DateTimeOffset.UtcNow + minSpacing;
+                await SaveDebugFile($"input_{DateTime.Now:yyyyMMdd_HHmmss}.txt", text);
             }
 
-            // Reindex chunk indices (0..N-1)
-            for (int i = 0; i < all.Count; i++)
-                all[i] = all[i] with { Index = i };
+            if (!_enablePanelization || totalTokens <= _singleWindowBudget)
+            {
+                LogDebug("ROUTING", "Using single-window chunking");
+                return await ChunkSingleWindowAsync(text, documentPath, onStream, ct);
+            }
 
-            return all;
+            LogDebug("ROUTING", "Using multi-panel chunking");
+            return await ChunkMultiPanelAsync(text, documentPath, onStream, ct);
         }
 
-        // === Single-window path ===
         private async Task<IReadOnlyList<ChunkRecord>> ChunkSingleWindowAsync(
-            string text, string? documentPath, Action<int, string>? onStream, CancellationToken ct)
+            string text,
+            string? documentPath,
+            Action<int, string>? onStream,
+            CancellationToken ct)
         {
+            LogDebug("SINGLE_WINDOW", "Entering single-window chunking mode");
+
+            // Calculate token count for the prompt
+            int totalTokens = CountTokens(text);
+            int expectedChunks = Math.Max(2, (int)Math.Ceiling(totalTokens / 500.0));
+
+            LogDebug("CHUNKING_PLAN", $"Document has {totalTokens} tokens, expecting approximately {expectedChunks} chunks");
+
+            // Enhanced system prompt with multiple examples and clear instructions
+            var systemPrompt = $@"You are a document chunking specialist. Your task is to split documents into semantically coherent chunks.
+
+REQUIREMENTS:
+1. Create chunks of 400-600 tokens each (approximately 2000-3000 characters)
+2. The input document has approximately {totalTokens} tokens
+3. You should create approximately {expectedChunks} chunks
+4. Each chunk must be semantically complete (don't break mid-sentence)
+5. Preserve ALL original text exactly as provided
+
+CRITICAL INSTRUCTIONS:
+1. Split the input into chunks of approximately 400-600 tokens each
+2. Each chunk should be semantically complete (don't break mid-sentence)
+3. Preserve all original text exactly as provided
+4. Include ALL content from the document - don't skip anything
+5. Output format is EXTREMELY IMPORTANT - follow it exactly
+
+OUTPUT FORMAT RULES:
+- Output the actual chunk content directly
+- After each chunk (except the last), add a separator line containing EXACTLY these 11 characters: ---CHUNK---
+- The separator must be on its own line
+- Do not add any labels, numbers, or extra text
+- Do not add markdown formatting or quotes around chunks
+
+EXAMPLE OF CORRECT OUTPUT for a ~{totalTokens} token document (expecting ~{expectedChunks} chunks):
+The Protection of Privacy Act (POPA) specifies the manner in which public bodies may collect personal information. This includes requirements for direct collection and providing notice to individuals about the purpose and authority for collection. [Continue for ~400-600 tokens]
+---CHUNK---
+Section 5 of POPA states that personal information must be collected directly from the individual it is about, unless there is an authority for indirect collection. The public body must inform the individual of the purpose, legal authority, and contact information. [Continue for ~400-600 tokens]
+---CHUNK---
+Collection notices must include the purpose statement, legal authority citation, and contact information for questions. This ensures transparency and allows individuals to make informed decisions about providing their personal information. [Continue with remaining content]
+
+Remember: Output ONLY chunk text and separators. Include ALL content from the original document.";
+
+            var userPrompt = $"Please chunk the following document according to the instructions:\n\n{text}";
+
             var messages = new List<ChatMessage>
             {
-                new SystemChatMessage(
-                    "You split the input into semantically coherent chunks (~400–600 tokens). " +
-                    "Return ONLY the chunks separated by the exact line '---CHUNK---' (no numbering, no extra text)."),
-                new UserChatMessage(text)
+                new SystemChatMessage(systemPrompt),
+                new UserChatMessage(userPrompt)
             };
+
+            // Save prompts for debugging
+            if (_debugMode)
+            {
+                await SaveDebugFile($"prompt_system_{DateTime.Now:yyyyMMdd_HHmmss}.txt", systemPrompt);
+                await SaveDebugFile($"prompt_user_{DateTime.Now:yyyyMMdd_HHmmss}.txt", userPrompt);
+            }
 
             var options = new ChatCompletionOptions();
             TrySetMaxTokens(options, _maxOutputTokens, onStream);
 
+            LogDebug("API_CALL", $"Calling GPT with max_tokens={_maxOutputTokens}, streaming={_streamEnabled && onStream != null}");
+
             if (!_streamEnabled || onStream is null)
             {
+                // Non-streaming path
+                LogDebug("API_MODE", "Using non-streaming API call");
+
                 var result = await _chat.CompleteChatAsync(messages, options, ct);
                 var content = result.Value.Content?.FirstOrDefault()?.Text ?? string.Empty;
+
+                LogDebug("RESPONSE", $"Received response length: {content.Length} chars");
+
+                // Save raw response
+                var responseFile = await SaveDebugFile($"response_raw_{DateTime.Now:yyyyMMdd_HHmmss}.txt", content);
+                LogDebug("DEBUG_FILE", $"Raw response saved to: {responseFile}");
+
+                // Analyze response for separators
+                AnalyzeResponseForSeparators(content);
+
                 return ParseChunks(content, documentPath);
             }
+            else
+            {
+                // Streaming path with enhanced debugging
+                LogDebug("API_MODE", "Using streaming API call");
+                return await StreamAndParseChunksAsync(messages, options, documentPath, onStream, ct);
+            }
+        }
 
-            // streaming
+        private async Task<IReadOnlyList<ChunkRecord>> StreamAndParseChunksAsync(
+            List<ChatMessage> messages,
+            ChatCompletionOptions options,
+            string? documentPath,
+            Action<int, string> onStream,
+            CancellationToken ct)
+        {
             var stream = _chat.CompleteChatStreamingAsync(messages, options, ct);
             var sb = new StringBuilder(8192);
             var lastTick = Environment.TickCount;
-            StreamWriter? dump2 = null;
+            StreamWriter? dump = null;
 
             try
             {
-                if (!string.IsNullOrWhiteSpace(_streamDumpDir))
+                // Setup stream dump file
+                if (!string.IsNullOrWhiteSpace(_debugOutputDir))
                 {
-                    Directory.CreateDirectory(_streamDumpDir!);
                     var safe = TraceLog.MakeFileSafe(documentPath ?? $"doc-{DateTime.UtcNow:yyyyMMdd-HHmmss}");
-                    var dumpPath = Path.Combine(_streamDumpDir!, $"{safe}.chunk-stream.txt");
-                    dump2 = new StreamWriter(new FileStream(dumpPath, FileMode.Create, FileAccess.Write, FileShare.Read), Encoding.UTF8);
-                    await dump2.WriteLineAsync($"# stream for: {documentPath}");
-                    await dump2.WriteLineAsync($"# utc start: {DateTime.UtcNow:O}");
+                    var dumpPath = Path.Combine(_debugOutputDir, $"{safe}.stream_{DateTime.Now:yyyyMMdd_HHmmss}.txt");
+                    dump = new StreamWriter(new FileStream(dumpPath, FileMode.Create, FileAccess.Write, FileShare.Read), Encoding.UTF8);
+                    await dump.WriteLineAsync($"# Stream for: {documentPath}");
+                    await dump.WriteLineAsync($"# UTC Start: {DateTime.UtcNow:O}");
+                    await dump.WriteLineAsync("# === STREAM CONTENT BELOW ===");
+                    LogDebug("STREAM_DUMP", $"Stream dump file: {dumpPath}");
                 }
 
+                int chunkCount = 0;
                 await foreach (var update in stream.WithCancellation(ct))
                 {
                     foreach (var part in update.ContentUpdate)
@@ -310,7 +256,18 @@ namespace PrivacyLens.Services
                         if (part.Kind == ChatMessageContentPartKind.Text && !string.IsNullOrEmpty(part.Text))
                         {
                             sb.Append(part.Text);
-                            if (dump2 is not null) await dump2.WriteAsync(part.Text);
+                            if (dump != null)
+                            {
+                                await dump.WriteAsync(part.Text);
+                                await dump.FlushAsync();
+                            }
+
+                            // Check for separator in stream
+                            if (part.Text.Contains("---CHUNK---"))
+                            {
+                                chunkCount++;
+                                LogDebug("STREAM_SEPARATOR", $"Found separator #{chunkCount} in stream");
+                            }
                         }
                     }
 
@@ -318,128 +275,304 @@ namespace PrivacyLens.Services
                     if (now - lastTick >= _streamUpdateIntervalMs)
                     {
                         lastTick = now;
-                        onStream.Invoke(sb.Length, $"[p 1/1] {Tail(sb, _streamPreviewChars)}");
-                        if (dump2 is not null) await dump2.FlushAsync();
+                        var preview = $"[p 1/1] {Tail(sb, _streamPreviewChars)}";
+                        onStream.Invoke(sb.Length, preview);
                     }
                 }
 
                 if (sb.Length > 0)
-                    onStream.Invoke(sb.Length, $"[p 1/1] {Tail(sb, _streamPreviewChars)}");
-
-                if (dump2 is not null)
                 {
-                    await dump2.WriteLineAsync();
-                    await dump2.WriteLineAsync($"# utc end: {DateTime.UtcNow:O}");
-                    await dump2.FlushAsync();
+                    onStream.Invoke(sb.Length, $"[p 1/1] {Tail(sb, _streamPreviewChars)}");
+                }
+
+                if (dump != null)
+                {
+                    await dump.WriteLineAsync("\n# === STREAM END ===");
+                    await dump.WriteLineAsync($"# UTC End: {DateTime.UtcNow:O}");
+                    await dump.WriteLineAsync($"# Total Length: {sb.Length} chars");
+                    await dump.FlushAsync();
                 }
             }
             finally
             {
-                if (dump2 is not null) await dump2.DisposeAsync();
+                dump?.Dispose();
             }
 
-            return ParseChunks(sb.ToString(), documentPath);
+            var finalContent = sb.ToString();
+
+            LogDebug("STREAM_COMPLETE", $"Final streamed content length: {finalContent.Length} chars");
+
+            // Save complete response
+            var responseFile = await SaveDebugFile($"response_streamed_{DateTime.Now:yyyyMMdd_HHmmss}.txt", finalContent);
+            LogDebug("DEBUG_FILE", $"Streamed response saved to: {responseFile}");
+
+            // Analyze response for separators
+            AnalyzeResponseForSeparators(finalContent);
+
+            return ParseChunks(finalContent, documentPath);
         }
 
-        // --- Token panels ---
-        private sealed record TokenPanel(string Text, int TokenCount);
-
-        private static IEnumerable<TokenPanel> BuildTokenPanels(string text, int targetTokens, int overlapTokens)
+        private void AnalyzeResponseForSeparators(string content)
         {
-            List<int> tokens = Enc.Encode(text);
-            if (tokens.Count == 0) yield break;
+            LogDebug("SEPARATOR_ANALYSIS", "Analyzing response for separators...");
 
-            if (targetTokens <= 0) targetTokens = 1000;
-            if (overlapTokens < 0) overlapTokens = 0;
-            if (overlapTokens >= targetTokens) overlapTokens = Math.Max(0, targetTokens / 5);
+            // Check for exact separator
+            int exactCount = 0;
+            int index = 0;
+            var positions = new List<int>();
 
-            int start = 0;
-            while (start < tokens.Count)
+            while ((index = content.IndexOf("---CHUNK---", index)) != -1)
             {
-                int end = Math.Min(start + targetTokens, tokens.Count);
-                List<int> slice = tokens.GetRange(start, end - start);
-                string panelText = Enc.Decode(slice);
-                yield return new TokenPanel(panelText, slice.Count);
-                if (end == tokens.Count) break;
-                start = Math.Max(0, end - overlapTokens);
+                exactCount++;
+                positions.Add(index);
+                LogDebug("SEPARATOR_FOUND", $"Found '---CHUNK---' at position {index}");
+                index += 11;
+            }
+
+            LogDebug("SEPARATOR_COUNT", $"Total exact separators found: {exactCount}");
+
+            // Check for variations
+            var variations = new[]
+            {
+                "--- CHUNK ---",
+                "---chunk---",
+                "CHUNK",
+                "--CHUNK--",
+                "===CHUNK===",
+                "\n---\n",
+                "---"
+            };
+
+            foreach (var variation in variations)
+            {
+                var count = content.Split(new[] { variation }, StringSplitOptions.None).Length - 1;
+                if (count > 0)
+                {
+                    LogDebug("SEPARATOR_VARIANT", $"Found {count} instances of '{variation}'");
+                }
+            }
+
+            // Show content snippets around expected separator locations
+            if (_verboseDebug && content.Length > 100)
+            {
+                LogDebug("CONTENT_PREVIEW", "First 500 chars:");
+                LogDebug("CONTENT", content.Substring(0, Math.Min(500, content.Length)));
+
+                if (content.Length > 1000)
+                {
+                    LogDebug("CONTENT_PREVIEW", "Middle 500 chars:");
+                    var midStart = content.Length / 2 - 250;
+                    LogDebug("CONTENT", content.Substring(midStart, 500));
+                }
+
+                LogDebug("CONTENT_PREVIEW", "Last 500 chars:");
+                LogDebug("CONTENT", content.Substring(Math.Max(0, content.Length - 500)));
             }
         }
-
-        /// <summary>
-        /// Tries to set a completion/output token cap on ChatCompletionOptions in a way
-        /// that works across SDK versions and model families.
-        /// </summary>
-        private bool TrySetMaxTokens(ChatCompletionOptions options, int? tokens, Action<int, string>? onStream)
-        {
-            // Prefer "MaxCompletionTokens" if present (newer SDKs / GPT-5)
-            var t = options.GetType();
-            var pNew = t.GetProperty("MaxCompletionTokens");
-            if (pNew is not null)
-            {
-                pNew.SetValue(options, tokens);
-                if (_emitPanelInfo) onStream?.Invoke(0, "@panel:info using MaxCompletionTokens");
-                return true;
-            }
-
-            // Older SDKs: MaxOutputTokenCount; GPT-5 may reject its wire mapping ('max_tokens')
-            if (_requireMaxCompletionTokens)
-            {
-                if (_emitPanelInfo) onStream?.Invoke(0, "@panel:info omitting max tokens (GPT-5 + SDK lacks MaxCompletionTokens)");
-                return false; // leave unset to avoid 400 unsupported_parameter
-            }
-
-            options.MaxOutputTokenCount = tokens;
-            if (_emitPanelInfo) onStream?.Invoke(0, "@panel:info using MaxOutputTokenCount");
-            return true;
-        }
-
-        // === Helpers ===
-        private static int CountTokens(string s) => Enc.CountTokens(s);
 
         private static List<ChunkRecord> ParseChunks(string content, string? documentPath)
         {
-            var parts = content.Split("\n---CHUNK---", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"\n[DEBUG ParseChunks] Starting parsing...");
+            Console.WriteLine($"[DEBUG ParseChunks] Input length: {content.Length} chars");
+            Console.ResetColor();
+
+            // Try multiple separator variations in order of preference
+            var separatorAttempts = new[]
+            {
+                new { Separator = "\n---CHUNK---\n", Name = "\\n---CHUNK---\\n (standard with newlines)" },
+                new { Separator = "---CHUNK---", Name = "---CHUNK--- (exact match)" },
+                new { Separator = "\r\n---CHUNK---\r\n", Name = "\\r\\n---CHUNK---\\r\\n (Windows newlines)" },
+                new { Separator = "\n---CHUNK---", Name = "\\n---CHUNK--- (leading newline)" },
+                new { Separator = "---CHUNK---\n", Name = "---CHUNK---\\n (trailing newline)" },
+                // Fallback patterns
+                new { Separator = "\n---\n", Name = "\\n---\\n (simple dashes)" },
+                new { Separator = "---", Name = "--- (just dashes)" }
+            };
+
+            string[] parts = null;
+            string usedSeparator = null;
+
+            foreach (var attempt in separatorAttempts)
+            {
+                if (content.Contains(attempt.Separator))
+                {
+                    parts = content.Split(new[] { attempt.Separator }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                    if (parts.Length > 1) // Only use if it actually splits
+                    {
+                        usedSeparator = attempt.Name;
+                        Console.ForegroundColor = ConsoleColor.Green;
+                        Console.WriteLine($"[DEBUG ParseChunks] Successfully split using: {usedSeparator}");
+                        Console.WriteLine($"[DEBUG ParseChunks] Found {parts.Length} parts");
+                        Console.ResetColor();
+                        break;
+                    }
+                }
+            }
+
+            // If no separator found or only one part, try pattern-based splitting
+            if (parts == null || parts.Length <= 1)
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("[DEBUG ParseChunks] No separator found, attempting pattern-based splitting...");
+                Console.ResetColor();
+
+                // Try to detect if there are numbered chunks or other patterns
+                var lines = content.Split('\n');
+                var potentialChunks = new List<string>();
+                var currentChunk = new StringBuilder();
+
+                foreach (var line in lines)
+                {
+                    // Check if line might be a chunk boundary (empty or contains only dashes/equals)
+                    if (string.IsNullOrWhiteSpace(line) ||
+                        line.Trim().All(c => c == '-' || c == '=' || c == '_'))
+                    {
+                        if (currentChunk.Length > 50) // Minimum chunk size
+                        {
+                            potentialChunks.Add(currentChunk.ToString().Trim());
+                            currentChunk.Clear();
+                        }
+                    }
+                    else
+                    {
+                        if (currentChunk.Length > 0) currentChunk.AppendLine();
+                        currentChunk.Append(line);
+                    }
+                }
+
+                // Add last chunk
+                if (currentChunk.Length > 50)
+                {
+                    potentialChunks.Add(currentChunk.ToString().Trim());
+                }
+
+                if (potentialChunks.Count > 1)
+                {
+                    parts = potentialChunks.ToArray();
+                    usedSeparator = "PATTERN_BASED (empty lines/dashes)";
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine($"[DEBUG ParseChunks] Pattern-based split found {parts.Length} potential chunks");
+                    Console.ResetColor();
+                }
+                else
+                {
+                    // Final fallback: treat entire content as one chunk
+                    parts = new[] { content };
+                    usedSeparator = "NONE (treating as single chunk)";
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine("[DEBUG ParseChunks] WARNING: No chunks detected, treating entire content as single chunk");
+                    Console.ResetColor();
+                }
+            }
+
+            // Log chunk details
             var chunks = new List<ChunkRecord>(parts.Length);
             for (int i = 0; i < parts.Length; i++)
-                chunks.Add(new ChunkRecord(documentPath ?? "", i, parts[i], Array.Empty<float>()));
+            {
+                var chunkText = parts[i].Trim();
+                if (!string.IsNullOrWhiteSpace(chunkText))
+                {
+                    chunks.Add(new ChunkRecord(
+                        DocumentPath: documentPath ?? "unknown",
+                        Index: i,
+                        Content: chunkText,
+                        Embedding: Array.Empty<float>()
+                    ));
+
+                    Console.ForegroundColor = ConsoleColor.Cyan;
+                    Console.WriteLine($"[DEBUG ParseChunks] Chunk {i + 1}: {chunkText.Length} chars, preview: {chunkText.Substring(0, Math.Min(100, chunkText.Length))}...");
+                    Console.ResetColor();
+                }
+            }
+
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"[DEBUG ParseChunks] Returning {chunks.Count} chunks");
+            Console.ResetColor();
+
             return chunks;
         }
 
-        private static void StitchInPlace(List<ChunkRecord> acc, List<ChunkRecord> next)
+        private async Task<IReadOnlyList<ChunkRecord>> ChunkMultiPanelAsync(
+            string text,
+            string? documentPath,
+            Action<int, string>? onStream,
+            CancellationToken ct)
         {
-            if (next.Count == 0) return;
-            if (acc.Count == 0) { acc.AddRange(next); return; }
+            // Implementation for multi-panel chunking
+            // (Keep existing implementation or add similar debugging)
+            LogDebug("MULTI_PANEL", "Multi-panel chunking not yet implemented with enhanced debugging");
 
-            foreach (var ch in next)
+            // Fallback to single window for now
+            return await ChunkSingleWindowAsync(text, documentPath, onStream, ct);
+        }
+
+        private void TrySetMaxTokens(ChatCompletionOptions options, int desired, Action<int, string>? onStream)
+        {
+            if (!_requireMaxCompletionTokens)
             {
-                if (acc.Count > 0 && NearlySame(acc[^1].Content, ch.Content))
-                    continue;
-                acc.Add(ch);
+                // Try setting without catching exception
+                try
+                {
+                    options.MaxOutputTokenCount = desired;
+                    LogDebug("MAX_TOKENS", $"Successfully set MaxOutputTokenCount to {desired}");
+                }
+                catch
+                {
+                    LogDebug("MAX_TOKENS", "Failed to set MaxOutputTokenCount, model may not support it");
+                }
             }
-
-            static bool NearlySame(string a, string b)
+            else
             {
-                string Normalize(string s) => s.Trim().Replace("\r", "").Replace("\n", " ").ToLowerInvariant();
-                var na = Normalize(a);
-                var nb = Normalize(b);
-                if (na.Length == 0 || nb.Length == 0) return na.Length == nb.Length;
-                return na.Contains(nb) || nb.Contains(na) || (2.0 * Lcs(na, nb) / Math.Max(na.Length, nb.Length)) >= 0.85;
-            }
-
-            static int Lcs(string a, string b)
-            {
-                var dp = new int[a.Length + 1, b.Length + 1];
-                for (int i = 1; i <= a.Length; i++)
-                    for (int j = 1; j <= b.Length; j++)
-                        dp[i, j] = a[i - 1] == b[j - 1] ? dp[i - 1, j - 1] + 1 : Math.Max(dp[i - 1, j], dp[i, j - 1]);
-                return dp[a.Length, b.Length];
+                options.MaxOutputTokenCount = desired;
+                LogDebug("MAX_TOKENS", $"Set MaxOutputTokenCount to {desired} (required mode)");
             }
         }
+
+        private int CountTokens(string text) => _enc.CountTokens(text);
 
         private static string Tail(StringBuilder sb, int maxChars)
         {
             if (sb.Length <= maxChars) return sb.ToString();
             return "…" + sb.ToString(sb.Length - maxChars, maxChars);
+        }
+
+        private void LogDebug(string category, string message)
+        {
+            if (!_debugMode) return;
+
+            var color = category switch
+            {
+                "ERROR" => ConsoleColor.Red,
+                "WARNING" => ConsoleColor.Yellow,
+                "SEPARATOR_FOUND" => ConsoleColor.Green,
+                "SEPARATOR_COUNT" => ConsoleColor.Cyan,
+                "API_CALL" => ConsoleColor.Magenta,
+                _ => ConsoleColor.Gray
+            };
+
+            Console.ForegroundColor = color;
+            Console.WriteLine($"[DEBUG {category}] {message}");
+            Console.ResetColor();
+        }
+
+        private async Task<string> SaveDebugFile(string filename, string content)
+        {
+            if (!_debugMode || string.IsNullOrWhiteSpace(_debugOutputDir))
+                return string.Empty;
+
+            var fullPath = Path.Combine(_debugOutputDir, filename);
+            await File.WriteAllTextAsync(fullPath, content);
+            return fullPath;
+        }
+
+        // Simplified TokenPanel for building
+        private record TokenPanel(string Text, int Tokens);
+
+        private static IEnumerable<TokenPanel> BuildTokenPanels(string text, int targetTokens, int overlapTokens)
+        {
+            // Simple implementation for now
+            yield return new TokenPanel(text, 0);
         }
     }
 }

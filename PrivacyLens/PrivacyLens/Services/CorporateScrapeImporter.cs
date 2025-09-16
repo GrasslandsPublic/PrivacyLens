@@ -1,4 +1,5 @@
-﻿using System;
+﻿// Services/CorporateScrapeImporter.cs - Enhanced with file validation
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -12,14 +13,10 @@ using PrivacyLens.Services;
 namespace PrivacyLens.Services
 {
     /// <summary>
-    /// Imports a scrape folder:
-    ///   • HTML in /webpages → DOM-segment + hybrid chunking → embed + save (with progress)
-    ///   • Docs in /documents → pipeline.ImportAsync (with progress)
-    ///
-    /// Features:
-    ///   • PDF validation (skip/quarantine invalid PDFs)
-    ///   • Console progress per stage
-    ///   • End-of-run summary
+    /// Enhanced importer for scrape folders with comprehensive file validation:
+    ///   • HTML in /webpages → DOM-segment + hybrid chunking → embed + save
+    ///   • Docs in /documents → validate → pipeline.ImportAsync
+    ///   • Invalid files → quarantine with detailed logging
     /// </summary>
     public sealed class CorporateScrapeImporter
     {
@@ -53,8 +50,15 @@ namespace PrivacyLens.Services
             var quarantineDir = Path.Combine(scrapeRoot, "_quarantine");
             Directory.CreateDirectory(quarantineDir);
 
+            // Create validation report file
+            var validationReportPath = Path.Combine(scrapeRoot, "validation_report.txt");
+            using var reportWriter = new StreamWriter(validationReportPath);
+            await reportWriter.WriteLineAsync($"=== Scrape Import Validation Report ===");
+            await reportWriter.WriteLineAsync($"Time: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+            await reportWriter.WriteLineAsync($"Scrape Root: {scrapeRoot}\n");
+
             int htmlOk = 0, htmlErr = 0;
-            int docOk = 0, docSkip = 0, docErr = 0;
+            int docOk = 0, docSkip = 0, docErr = 0, docQuarantined = 0;
 
             Console.WriteLine("Analyzing scrape folders...\n");
 
@@ -64,19 +68,19 @@ namespace PrivacyLens.Services
 
             var docFiles = Directory.Exists(docsDir)
                 ? Directory.GetFiles(docsDir, "*.*", SearchOption.TopDirectoryOnly)
-                    .Where(f => new[] { ".pdf", ".docx", ".pptx", ".xlsx" }
-                        .Contains(Path.GetExtension(f).ToLowerInvariant()))
+                    .Where(f => !f.EndsWith(".meta.json", StringComparison.OrdinalIgnoreCase))
                     .ToArray()
                 : Array.Empty<string>();
 
-            Console.WriteLine($" HTML pages : {htmlFiles.Length}");
-            Console.WriteLine($" Documents  : {docFiles.Length}");
+            Console.WriteLine($" 📄 HTML pages : {htmlFiles.Length}");
+            Console.WriteLine($" 📁 Documents  : {docFiles.Length}");
             Console.WriteLine();
 
-            // ===== HTML IMPORT (hybrid chunking → embed → save) =====
+            // ===== HTML IMPORT =====
             if (htmlFiles.Length > 0)
             {
                 Console.WriteLine("Importing HTML pages (hybrid chunking):\n");
+                await reportWriter.WriteLineAsync("=== HTML Pages ===");
 
                 for (int i = 0; i < htmlFiles.Length; i++)
                 {
@@ -92,12 +96,21 @@ namespace PrivacyLens.Services
                     {
                         var html = await File.ReadAllTextAsync(file, ct);
 
-                        // 1) Chunk HTML using hybrid strategy (DOM + simple/GPT per section)
-                        var chunkRecords = await _htmlOrchestrator.ChunkHtmlAsync(html, file, ct);
+                        // Basic HTML validation
+                        if (string.IsNullOrWhiteSpace(html) || html.Length < 100)
+                        {
+                            Console.ForegroundColor = ConsoleColor.Yellow;
+                            Console.WriteLine($"  ⚠️ Skipping: HTML too short ({html.Length} chars)");
+                            Console.ResetColor();
+                            await reportWriter.WriteLineAsync($"SKIP: {name} - Too short ({html.Length} chars)");
+                            continue;
+                        }
 
+                        // Chunk HTML using hybrid strategy
+                        var chunkRecords = await _htmlOrchestrator.ChunkHtmlAsync(html, file, ct);
                         Console.WriteLine($"  • Sections/chunks: {chunkRecords.Count}");
 
-                        // 2) Embed each chunk and save
+                        // Embed each chunk and save
                         var materialized = new List<ChunkRecord>(chunkRecords.Count);
                         for (int c = 0; c < chunkRecords.Count; c++)
                         {
@@ -114,25 +127,28 @@ namespace PrivacyLens.Services
                         }
 
                         await _store.SaveChunksAsync(materialized, ct);
-                        Console.WriteLine("  ✓ Saved chunks to database");
+                        Console.WriteLine("  ✅ Saved chunks to database");
+                        await reportWriter.WriteLineAsync($"OK: {name} - {chunkRecords.Count} chunks");
                         htmlOk++;
                     }
                     catch (Exception ex)
                     {
                         htmlErr++;
                         Console.ForegroundColor = ConsoleColor.Red;
-                        Console.WriteLine($"  ✗ HTML import failed: {ex.Message}");
+                        Console.WriteLine($"  ❌ HTML import failed: {ex.Message}");
                         Console.ResetColor();
+                        await reportWriter.WriteLineAsync($"ERROR: {name} - {ex.Message}");
                     }
                 }
 
                 Console.WriteLine();
             }
 
-            // ===== DOCUMENT IMPORT (pipeline) =====
+            // ===== DOCUMENT IMPORT with validation =====
             if (docFiles.Length > 0)
             {
                 Console.WriteLine("Importing downloaded documents:\n");
+                await reportWriter.WriteLineAsync("\n=== Documents ===");
 
                 for (int i = 0; i < docFiles.Length; i++)
                 {
@@ -142,38 +158,127 @@ namespace PrivacyLens.Services
                     var ext = Path.GetExtension(file).ToLowerInvariant();
 
                     Console.ForegroundColor = ConsoleColor.Cyan;
-                    Console.WriteLine($"[{i + 1}/{docFiles.Length}] (DOC ) {name}");
+                    Console.WriteLine($"[{i + 1}/{docFiles.Length}] (DOC) {name}");
                     Console.ResetColor();
 
                     try
                     {
-                        // Validate PDFs up-front to avoid PdfPig "startxref" errors
-                        if (ext == ".pdf" && !IsLikelyPdf(file))
+                        // File size validation
+                        var fileInfo = new FileInfo(file);
+                        if (fileInfo.Length == 0)
                         {
-                            docSkip++;
+                            docQuarantined++;
                             Console.ForegroundColor = ConsoleColor.Yellow;
-                            Console.WriteLine("  ⚠ Skipping: Not a valid PDF (missing %PDF- header). Moving to _quarantine.");
+                            Console.WriteLine($"  ⚠️ Quarantining: Empty file (0 bytes)");
                             Console.ResetColor();
 
-                            var dest = Path.Combine(quarantineDir, name);
-                            SafeMove(file, dest);
+                            await QuarantineFileAsync(file, quarantineDir, "empty_file");
+                            await reportWriter.WriteLineAsync($"QUARANTINE: {name} - Empty file");
                             continue;
                         }
 
+                        // Validate file based on extension and magic bytes
+                        bool isValid = false;
+                        string? detectedType = null;
+
+                        if (!string.IsNullOrEmpty(ext))
+                        {
+                            isValid = FileValidator.IsValid(file, ext);
+                            if (!isValid)
+                            {
+                                // Try to detect actual type
+                                detectedType = FileValidator.DetectFileType(file);
+                                if (!string.IsNullOrEmpty(detectedType))
+                                {
+                                    Console.WriteLine($"  ℹ️ File type mismatch: expected {ext}, detected {detectedType}");
+
+                                    // If it's a valid document type, rename and proceed
+                                    if (IsDocumentExtension(detectedType))
+                                    {
+                                        var newPath = Path.ChangeExtension(file, detectedType);
+                                        if (!File.Exists(newPath))
+                                        {
+                                            File.Move(file, newPath);
+                                            file = newPath;
+                                            name = Path.GetFileName(file);
+                                            ext = detectedType;
+                                            isValid = true;
+                                            Console.WriteLine($"  ✅ Renamed to: {name}");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Special handling for PDFs
+                        if (ext == ".pdf" && !FileValidator.IsValidPdf(file))
+                        {
+                            docQuarantined++;
+                            Console.ForegroundColor = ConsoleColor.Yellow;
+                            Console.WriteLine($"  ⚠️ Quarantining: Invalid PDF (bad signature)");
+                            Console.ResetColor();
+
+                            await QuarantineFileAsync(file, quarantineDir, "invalid_pdf");
+                            await reportWriter.WriteLineAsync($"QUARANTINE: {name} - Invalid PDF signature");
+                            continue;
+                        }
+
+                        // Skip HTML files that ended up in documents folder
+                        if (ext == ".html" || ext == ".htm")
+                        {
+                            docSkip++;
+                            Console.WriteLine($"  ℹ️ Skipping: HTML file in documents folder");
+                            await reportWriter.WriteLineAsync($"SKIP: {name} - HTML file");
+                            continue;
+                        }
+
+                        // Additional validation for Office documents
+                        if (IsOfficeDocument(ext))
+                        {
+                            if (!FileValidator.IsValid(file, ext))
+                            {
+                                // Check if it's actually a corrupted download (common with HTML error pages)
+                                var firstBytes = await ReadFirstBytesAsync(file, 1000);
+                                if (IsLikelyHtmlError(firstBytes))
+                                {
+                                    docQuarantined++;
+                                    Console.ForegroundColor = ConsoleColor.Yellow;
+                                    Console.WriteLine($"  ⚠️ Quarantining: HTML error page saved as {ext}");
+                                    Console.ResetColor();
+
+                                    await QuarantineFileAsync(file, quarantineDir, "html_error_as_document");
+                                    await reportWriter.WriteLineAsync($"QUARANTINE: {name} - HTML error page");
+                                    continue;
+                                }
+                            }
+                        }
+
+                        // If file passed all validations, import it
                         var progress = new ConsoleProgress(name);
                         await _pipeline.ImportAsync(file, progress, i + 1, docFiles.Length, ct);
+                        await reportWriter.WriteLineAsync($"OK: {name} - Imported successfully");
                         docOk++;
+                    }
+                    catch (InvalidDataException idEx)
+                    {
+                        docQuarantined++;
+                        Console.ForegroundColor = ConsoleColor.Yellow;
+                        Console.WriteLine($"  ⚠️ Invalid data: {idEx.Message}. Moving to quarantine.");
+                        Console.ResetColor();
+
+                        await QuarantineFileAsync(file, quarantineDir, "invalid_data");
+                        await reportWriter.WriteLineAsync($"QUARANTINE: {name} - {idEx.Message}");
                     }
                     catch (Exception ex)
                     {
                         docErr++;
                         Console.ForegroundColor = ConsoleColor.Red;
-                        Console.WriteLine($"  ✗ DOC import failed: {ex.Message}");
+                        Console.WriteLine($"  ❌ DOC import failed: {ex.Message}");
                         Console.ResetColor();
 
-                        // Quarantine problematic file to unblock rest of the batch
-                        var dest = Path.Combine(quarantineDir, name);
-                        SafeMove(file, dest);
+                        // Quarantine problematic files
+                        await QuarantineFileAsync(file, quarantineDir, "import_error");
+                        await reportWriter.WriteLineAsync($"ERROR: {name} - {ex.Message}");
                     }
                 }
 
@@ -181,48 +286,126 @@ namespace PrivacyLens.Services
             }
 
             // ===== SUMMARY =====
-            Console.WriteLine("========================================");
-            Console.WriteLine(" Import Summary");
-            Console.WriteLine("========================================");
-            Console.WriteLine($" HTML:  OK={htmlOk},  ERR={htmlErr}");
-            Console.WriteLine($" DOCS:  OK={docOk},  SKIP={docSkip}, ERR={docErr}");
-            Console.WriteLine($" Quarantine: {Directory.GetFiles(quarantineDir, "*", SearchOption.TopDirectoryOnly).Length} file(s)");
-            Console.WriteLine("========================================\n");
-        }
-
-        private static bool IsLikelyPdf(string path)
-        {
-            try
+            var summary = new[]
             {
-                using var fs = File.OpenRead(path);
-                if (fs.Length < 6) return false;
-                Span<byte> sig = stackalloc byte[5];
-                _ = fs.Read(sig);
-                var hdr = System.Text.Encoding.ASCII.GetString(sig);
-                return hdr == "%PDF-";
+                "========================================",
+                " Import Summary",
+                "========================================",
+                $" HTML:  OK={htmlOk}, ERR={htmlErr}",
+                $" DOCS:  OK={docOk}, SKIP={docSkip}, ERR={docErr}, QUARANTINED={docQuarantined}",
+                $" Quarantine: {Directory.GetFiles(quarantineDir, "*", SearchOption.TopDirectoryOnly).Length} file(s)",
+                "========================================"
+            };
+
+            foreach (var line in summary)
+            {
+                Console.WriteLine(line);
+                await reportWriter.WriteLineAsync(line);
             }
-            catch { return false; }
+
+            Console.WriteLine();
+            await reportWriter.WriteLineAsync($"\nCompleted: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
         }
 
-        private static void SafeMove(string src, string dest)
+        private static async Task QuarantineFileAsync(string sourcePath, string quarantineDir, string reason)
         {
             try
             {
-                if (File.Exists(dest))
+                var fileName = Path.GetFileName(sourcePath);
+                var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                var quarantineName = $"{Path.GetFileNameWithoutExtension(fileName)}_{reason}_{timestamp}{Path.GetExtension(fileName)}";
+                var destPath = Path.Combine(quarantineDir, quarantineName);
+
+                // Move the file
+                File.Move(sourcePath, destPath);
+
+                // Create a metadata file
+                var metaPath = Path.ChangeExtension(destPath, ".quarantine.json");
+                var metadata = new
                 {
-                    var name = Path.GetFileNameWithoutExtension(dest);
-                    var ext = Path.GetExtension(dest);
-                    dest = Path.Combine(Path.GetDirectoryName(dest)!, $"{name}_{DateTime.Now:HHmmssfff}{ext}");
-                }
-                File.Move(src, dest);
+                    OriginalPath = sourcePath,
+                    OriginalName = fileName,
+                    QuarantineReason = reason,
+                    QuarantineTime = DateTime.UtcNow,
+                    FileSize = new FileInfo(destPath).Length
+                };
+
+                await File.WriteAllTextAsync(metaPath,
+                    System.Text.Json.JsonSerializer.Serialize(metadata,
+                        new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  ⚠️ Failed to quarantine file: {ex.Message}");
+            }
+        }
+
+        private static bool IsDocumentExtension(string ext)
+        {
+            if (string.IsNullOrEmpty(ext)) return false;
+            if (!ext.StartsWith(".")) ext = "." + ext;
+
+            var docExtensions = new[] {
+                ".pdf", ".doc", ".docx", ".xls", ".xlsx",
+                ".ppt", ".pptx", ".txt", ".csv", ".rtf", ".zip"
+            };
+
+            return docExtensions.Contains(ext.ToLowerInvariant());
+        }
+
+        private static bool IsOfficeDocument(string ext)
+        {
+            if (string.IsNullOrEmpty(ext)) return false;
+            if (!ext.StartsWith(".")) ext = "." + ext;
+
+            var officeExtensions = new[] {
+                ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"
+            };
+
+            return officeExtensions.Contains(ext.ToLowerInvariant());
+        }
+
+        private static async Task<byte[]> ReadFirstBytesAsync(string filePath, int count)
+        {
+            try
+            {
+                using var fs = File.OpenRead(filePath);
+                var buffer = new byte[Math.Min(count, fs.Length)];
+                await fs.ReadAsync(buffer, 0, buffer.Length);
+                return buffer;
             }
             catch
             {
-                // ignore; not fatal
+                return Array.Empty<byte>();
             }
         }
 
-        /// <summary>Console progress reporter that prints pipeline stages.</summary>
+        private static bool IsLikelyHtmlError(byte[] bytes)
+        {
+            if (bytes == null || bytes.Length == 0) return false;
+
+            var text = System.Text.Encoding.UTF8.GetString(bytes).ToLowerInvariant();
+
+            // Common HTML error indicators
+            var errorIndicators = new[]
+            {
+                "<!doctype html",
+                "<html",
+                "404",
+                "403",
+                "error",
+                "not found",
+                "forbidden",
+                "unauthorized",
+                "access denied"
+            };
+
+            return errorIndicators.Any(indicator => text.Contains(indicator));
+        }
+
+        /// <summary>
+        /// Console progress reporter that prints pipeline stages
+        /// </summary>
         private sealed class ConsoleProgress : IProgress<ImportProgress>
         {
             private readonly string _name;
