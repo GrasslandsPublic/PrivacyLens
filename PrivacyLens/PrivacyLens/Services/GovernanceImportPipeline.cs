@@ -1,4 +1,7 @@
-﻿// Services/GovernanceImportPipeline.cs
+﻿// Services/GovernanceImportPipeline.cs — Patched
+// - Adds ImportTextAsync for direct text ingestion with progress
+// - Adds IsLikelyPdfFile() and PDF signature check in ExtractPdf()
+// - Keeps existing GPT panelized chunking pipeline for files
 using System;
 using System.IO;
 using System.Linq;
@@ -32,7 +35,6 @@ namespace PrivacyLens.Services
         private readonly IEmbeddingService _embeddings;
         private readonly IVectorStore _store;
         private readonly ILogger<GovernanceImportPipeline>? _logger;
-
         private readonly bool _verbose;
         private readonly bool _showStageDurations;
         private readonly int _maxRetries;
@@ -40,10 +42,8 @@ namespace PrivacyLens.Services
         private readonly int _maxDelayMs;
         private readonly int _jitterMs;
         private readonly int _minDelayBetweenRequestsMs;
-
         // Optional fixed dimension from config (VectorStore:DesiredEmbeddingDim)
         private readonly int? _fixedDim;
-
         private string _folderPath = string.Empty;
         public string DefaultFolderPath => _folderPath;
 
@@ -82,10 +82,8 @@ namespace PrivacyLens.Services
             _baseDelayMs = config.GetValue<int>("AzureOpenAI:Retry:BaseDelayMs", 1500);
             _maxDelayMs = config.GetValue<int>("AzureOpenAI:Retry:MaxDelayMs", 60000);
             _jitterMs = config.GetValue<int>("AzureOpenAI:Retry:JitterMs", 250);
-
             _minDelayBetweenRequestsMs = config.GetValue<int>("AzureOpenAI:MinDelayBetweenRequestsMs", 0);
 
-            // If enforcing fixed dim in DB, pick it up here for a friendly check
             _fixedDim = config.GetValue<int?>("VectorStore:DesiredEmbeddingDim");
         }
 
@@ -126,6 +124,78 @@ namespace PrivacyLens.Services
             }
         }
 
+        /// <summary>
+        /// Import raw text content (e.g., cleaned HTML or aggregated text) and persist chunks.
+        /// </summary>
+        public async Task ImportTextAsync(
+            string text,
+            string syntheticPath,
+            IProgress<ImportProgress>? progress = null,
+            int current = 1,
+            int total = 1,
+            CancellationToken ct = default)
+        {
+            var name = Path.GetFileName(syntheticPath);
+            var safeName = TraceLog.MakeFileSafe(name);
+            var tracesDir = Path.Combine(AppContext.BaseDirectory, ".diagnostics", "traces");
+            await using var trace = new TraceLog(tracesDir, safeName);
+            await trace.InitAsync($"ingestion text trace for {name}");
+
+            // 1) Chunk
+            var sw = Stopwatch.StartNew();
+            progress?.Report(new ImportProgress(current, total, name, "Chunk"));
+            IReadOnlyList<ChunkRecord> chunks = await _chunking.ChunkAsync(text, syntheticPath,
+                onStream: (chars, preview) =>
+                {
+                    if (!string.IsNullOrEmpty(preview))
+                        progress?.Report(new ImportProgress(current, total, name, "Chunk", SanitizeProgress(preview)));
+                }, ct);
+            sw.Stop();
+            await trace.WriteLineAsync($"CHUNK ok chunks={chunks.Count:N0}");
+            if (_showStageDurations)
+                progress?.Report(new ImportProgress(current, total, name, "Chunk", StageElapsedMs: sw.ElapsedMilliseconds));
+
+            // 2) Embed + Save
+            progress?.Report(new ImportProgress(current, total, name, "Embed+Save", $"chunks={chunks.Count}"));
+            var embedSw = Stopwatch.StartNew();
+            var materialized = new List<ChunkRecord>(chunks.Count);
+
+            for (int i = 0; i < chunks.Count; i++)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (_minDelayBetweenRequestsMs > 0 && i > 0)
+                    await Task.Delay(_minDelayBetweenRequestsMs, ct);
+
+                var ch = chunks[i];
+                var tok = CountTokens(ch.Content);
+                var perSw = Stopwatch.StartNew();
+                float[] embedding = await _embeddings.EmbedAsync(ch.Content, ct);
+                perSw.Stop();
+
+                if (_fixedDim.HasValue && embedding.Length != _fixedDim.Value)
+                    throw new InvalidOperationException(
+                        $"Embedding dimension mismatch: expected {_fixedDim.Value}, got {embedding.Length}. " +
+                        $"Check your embedding deployment (e.g., use 'text-embedding-3-large' for 3072).");
+
+                materialized.Add(ch with { Embedding = embedding });
+                progress?.Report(new ImportProgress(
+                    current, total, name, "Embed",
+                    $"chunk {i + 1}/{chunks.Count} tok={tok} emb_dim={embedding.Length} {perSw.ElapsedMilliseconds}ms"));
+            }
+
+            embedSw.Stop();
+            if (_showStageDurations)
+                progress?.Report(new ImportProgress(current, total, name, "Embed", StageElapsedMs: embedSw.ElapsedMilliseconds));
+
+            // Save
+            var saveSw = Stopwatch.StartNew();
+            progress?.Report(new ImportProgress(current, total, name, "Save", $"writing {materialized.Count} chunks..."));
+            await _store.SaveChunksAsync(materialized, ct);
+            saveSw.Stop();
+            if (_showStageDurations)
+                progress?.Report(new ImportProgress(current, total, name, "Save", StageElapsedMs: saveSw.ElapsedMilliseconds));
+        }
+
         public async Task ImportAsync(
             string filePath,
             IProgress<ImportProgress>? progress = null,
@@ -137,7 +207,6 @@ namespace PrivacyLens.Services
                 throw new FileNotFoundException("File not found.", filePath);
 
             var name = Path.GetFileName(filePath);
-
             var safeName = TraceLog.MakeFileSafe(name);
             var tracesDir = Path.Combine(AppContext.BaseDirectory, ".diagnostics", "traces");
             await using var trace = new TraceLog(tracesDir, safeName);
@@ -167,10 +236,9 @@ namespace PrivacyLens.Services
                         progress?.Report(new ImportProgress(current, total, name, "Chunk", status));
                     return;
                 }
-
                 var clean = SanitizeProgress(preview);
-                if (string.IsNullOrEmpty(clean)) return;
-                progress?.Report(new ImportProgress(current, total, name, "Chunk", clean));
+                if (!string.IsNullOrEmpty(clean))
+                    progress?.Report(new ImportProgress(current, total, name, "Chunk", clean));
             };
 
             IReadOnlyList<ChunkRecord> chunks = await _chunking.ChunkAsync(text, filePath, onStream, ct);
@@ -178,11 +246,11 @@ namespace PrivacyLens.Services
             if (_showStageDurations)
                 progress?.Report(new ImportProgress(current, total, name, "Chunk", StageElapsedMs: sw.ElapsedMilliseconds));
 
-            // 3) Embed + Save with verbose details and dimension guard
+            // 3) Embed + Save with dimension guard
             progress?.Report(new ImportProgress(current, total, name, "Embed+Save", $"chunks={chunks.Count}"));
             var embedSw = Stopwatch.StartNew();
-
             var materialized = new List<ChunkRecord>(chunks.Count);
+
             for (int i = 0; i < chunks.Count; i++)
             {
                 ct.ThrowIfCancellationRequested();
@@ -191,21 +259,16 @@ namespace PrivacyLens.Services
 
                 var ch = chunks[i];
                 var tok = CountTokens(ch.Content);
-
                 var perSw = Stopwatch.StartNew();
                 float[] embedding = await _embeddings.EmbedAsync(ch.Content, ct);
                 perSw.Stop();
 
-                // *** Fixed-dimension guard ***
                 if (_fixedDim.HasValue && embedding.Length != _fixedDim.Value)
-                {
                     throw new InvalidOperationException(
                         $"Embedding dimension mismatch: expected {_fixedDim.Value}, got {embedding.Length}. " +
                         $"Check your embedding deployment (e.g., use 'text-embedding-3-large' for 3072).");
-                }
 
                 materialized.Add(ch with { Embedding = embedding });
-
                 progress?.Report(new ImportProgress(
                     current, total, name, "Embed",
                     $"chunk {i + 1}/{chunks.Count} tok={tok} emb_dim={embedding.Length} {perSw.ElapsedMilliseconds}ms"));
@@ -215,32 +278,11 @@ namespace PrivacyLens.Services
             if (_showStageDurations)
                 progress?.Report(new ImportProgress(current, total, name, "Embed", StageElapsedMs: embedSw.ElapsedMilliseconds));
 
-            // Save with per-row progress if supported
+            // Save with simple progress
             var saveSw = Stopwatch.StartNew();
-            if (_store is VectorStore concreteStore)
-            {
-                progress?.Report(new ImportProgress(current, total, name, "Save", $"writing {materialized.Count} chunks..."));
-                int lastShown = 0;
-                await concreteStore.SaveChunksWithProgressAsync(
-                    materialized,
-                    (done, count, msg) =>
-                    {
-                        if (done == count || done - lastShown >= Math.Max(1, count / 20))
-                        {
-                            lastShown = done;
-                            progress?.Report(new ImportProgress(current, total, name, "Save",
-                                $"{done}/{count} {msg}"));
-                        }
-                    },
-                    ct);
-            }
-            else
-            {
-                progress?.Report(new ImportProgress(current, total, name, "Save", $"writing {materialized.Count} chunks..."));
-                await _store.SaveChunksAsync(materialized, ct);
-                progress?.Report(new ImportProgress(current, total, name, "Save", $"saved {materialized.Count} chunks"));
-            }
-
+            progress?.Report(new ImportProgress(current, total, name, "Save", $"writing {materialized.Count} chunks..."));
+            await _store.SaveChunksAsync(materialized, ct);
+            progress?.Report(new ImportProgress(current, total, name, "Save", $"saved {materialized.Count} chunks"));
             saveSw.Stop();
             if (_showStageDurations)
                 progress?.Report(new ImportProgress(current, total, name, "Save", StageElapsedMs: saveSw.ElapsedMilliseconds));
@@ -266,8 +308,24 @@ namespace PrivacyLens.Services
             };
         }
 
+        private static bool IsLikelyPdfFile(string filePath)
+        {
+            try
+            {
+                using var fs = File.OpenRead(filePath);
+                if (fs.Length < 6) return false;
+                Span<byte> sig = stackalloc byte[5];
+                _ = fs.Read(sig);
+                return Encoding.ASCII.GetString(sig) == "%PDF-";
+            }
+            catch { return false; }
+        }
+
         private static string ExtractPdf(string filePath)
         {
+            if (!IsLikelyPdfFile(filePath))
+                throw new InvalidDataException($"File is not a valid PDF (missing %PDF- header): {Path.GetFileName(filePath)}");
+
             var sb = new StringBuilder();
             using var pdf = PdfDocument.Open(filePath);
             foreach (var page in pdf.GetPages())
@@ -280,6 +338,7 @@ namespace PrivacyLens.Services
             using var doc = WordprocessingDocument.Open(filePath, false);
             var body = doc.MainDocumentPart?.Document?.Body;
             if (body is null) return string.Empty;
+
             var sb = new StringBuilder();
             foreach (var p in body.Descendants<Paragraph>())
             {
@@ -295,6 +354,7 @@ namespace PrivacyLens.Services
             using var pres = PresentationDocument.Open(filePath, false);
             var presPart = pres.PresentationPart;
             if (presPart is null) return string.Empty;
+
             var sb = new StringBuilder();
             foreach (var slidePart in presPart.SlideParts)
             {
@@ -316,9 +376,11 @@ namespace PrivacyLens.Services
             using var ss = SpreadsheetDocument.Open(filePath, false);
             var wbPart = ss.WorkbookPart;
             if (wbPart is null) return string.Empty;
+
             var sb = new StringBuilder();
             var sst = wbPart.SharedStringTablePart?.SharedStringTable;
             var sheets = wbPart.Workbook.Sheets?.OfType<Sheet>() ?? Enumerable.Empty<Sheet>();
+
             foreach (var sheet in sheets)
             {
                 var relId = sheet.Id?.Value;
@@ -338,6 +400,7 @@ namespace PrivacyLens.Services
                 }
                 sb.AppendLine();
             }
+
             return sb.ToString();
         }
 
