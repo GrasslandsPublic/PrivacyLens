@@ -140,32 +140,30 @@ namespace PrivacyLens.Services
             Action<int, string>? onStream = null,
             CancellationToken ct = default)
         {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                LogError("CHUNK_ERROR", "Empty or null text provided");
+                return Array.Empty<ChunkRecord>();
+            }
+
             var stopwatch = Stopwatch.StartNew();
-            _lastStatistics = new ChunkingStatistics();
 
             try
             {
-                LogDebug("CHUNK_START", $"Starting chunking for document: {documentPath ?? "unnamed"}");
+                // Initialize statistics
+                _lastStatistics = new ChunkingStatistics
+                {
+                    DocumentTokens = CountTokens(text)
+                };
 
-                var tokenCount = CountTokens(text);
-                _lastStatistics.DocumentTokens = tokenCount;
-
-                LogDebug("TOKEN_COUNT", $"Document has {tokenCount} tokens");
-
-                // Report initial statistics
-                onStream?.Invoke(0, $"@stats:tokens Document contains {tokenCount} tokens");
-
-                // Rate limiting
-                await EnforceRateLimitAsync(tokenCount, ct);
+                onStream?.Invoke(0, $"@stats:tokens Document contains {_lastStatistics.DocumentTokens} tokens");
 
                 IReadOnlyList<ChunkRecord> chunks;
 
-                // Decide whether to use panelization
-                if (tokenCount <= _singleWindowBudget || !_enablePanelization)
+                // Decide chunking strategy based on document size
+                if (_lastStatistics.DocumentTokens <= _singleWindowBudget || !_enablePanelization)
                 {
-                    LogDebug("SINGLE_WINDOW", $"Using single-window chunking (tokens: {tokenCount}, budget: {_singleWindowBudget})");
                     onStream?.Invoke(0, "@stats:strategy Using single-window chunking");
-
                     _lastStatistics.UsedPanelization = false;
                     _lastStatistics.PanelCount = 1;
 
@@ -173,28 +171,21 @@ namespace PrivacyLens.Services
                 }
                 else
                 {
-                    LogDebug("PANELIZATION", $"Using panelization (tokens: {tokenCount}, budget: {_singleWindowBudget})");
-
-                    // Calculate panel count
-                    int stride = _targetPanelTokens - _overlapTokens;
-                    int estimatedPanels = (int)Math.Ceiling((double)(tokenCount - _overlapTokens) / stride);
-
-                    onStream?.Invoke(0, $"@stats:strategy Using panelization with ~{estimatedPanels} panels");
-
+                    onStream?.Invoke(0, "@stats:strategy Using multi-panel chunking");
                     _lastStatistics.UsedPanelization = true;
-                    _lastStatistics.PanelCount = estimatedPanels;
 
                     chunks = await ChunkWithPanelizationAsync(text, documentPath, onStream, ct);
                 }
 
-                // Calculate chunk statistics
+                // Update statistics
                 _lastStatistics.TotalChunks = chunks.Count;
+
                 foreach (var chunk in chunks)
                 {
-                    var chunkTokens = CountTokens(chunk.Content);
-                    _lastStatistics.TotalChunkTokens += chunkTokens;
-                    _lastStatistics.MinChunkTokens = Math.Min(_lastStatistics.MinChunkTokens, chunkTokens);
-                    _lastStatistics.MaxChunkTokens = Math.Max(_lastStatistics.MaxChunkTokens, chunkTokens);
+                    var tokenCount = CountTokens(chunk.Content);
+                    _lastStatistics.TotalChunkTokens += tokenCount;
+                    _lastStatistics.MinChunkTokens = Math.Min(_lastStatistics.MinChunkTokens, tokenCount);
+                    _lastStatistics.MaxChunkTokens = Math.Max(_lastStatistics.MaxChunkTokens, tokenCount);
                 }
 
                 stopwatch.Stop();
@@ -234,7 +225,14 @@ namespace PrivacyLens.Services
             CancellationToken ct)
         {
             var prompt = BuildChunkingPrompt(text, isPanel: false);
-            var response = await CallGptAsync(prompt, onStream, ct);
+
+            // Report that we're processing
+            onStream?.Invoke(0, "@chunk:processing Sending to GPT for chunking...");
+
+            var response = await CallGptAsync(prompt, null, ct); // Don't pass onStream to avoid token spam
+
+            onStream?.Invoke(0, "@chunk:parsing Parsing response into chunks...");
+
             return ParseChunkingResponse(response, documentPath);
         }
 
@@ -249,6 +247,7 @@ namespace PrivacyLens.Services
             // Build panels
             var panels = BuildTokenPanels(text, _targetPanelTokens, _overlapTokens);
             LogDebug("PANELS_CREATED", $"Created {panels.Count} panels");
+            _lastStatistics!.PanelCount = panels.Count;
 
             onStream?.Invoke(0, $"@panel:info Processing {panels.Count} panels with {_overlapTokens} token overlap");
 
@@ -264,105 +263,98 @@ namespace PrivacyLens.Services
                 // Build panel-specific prompt
                 var panelPrompt = BuildPanelPrompt(panel.Text, i + 1, panels.Count, i > 0);
 
-                // Get chunks for this panel
-                var panelResponse = await CallGptAsync(panelPrompt, onStream, ct);
+                // Get chunks for this panel - DON'T pass onStream to avoid token spam
+                var panelResponse = await CallGptAsync(panelPrompt, null, ct);
                 var panelChunks = ParseChunkingResponse(panelResponse, documentPath);
 
                 LogDebug("PANEL_CHUNKS", $"Panel {i + 1} generated {panelChunks.Count} chunks");
 
-                // Stitch chunks (handle overlaps)
-                if (i == 0)
+                // Stitch chunks (remove last chunk from previous panel if not first panel)
+                if (i > 0 && allChunks.Count > 0)
                 {
-                    allChunks.AddRange(panelChunks);
+                    // Remove the last chunk from previous panel (likely incomplete)
+                    allChunks.RemoveAt(allChunks.Count - 1);
                 }
-                else
-                {
-                    // Remove last chunk from previous panel (likely incomplete)
-                    // and add all chunks from current panel
-                    if (allChunks.Count > 0)
-                    {
-                        LogDebug("STITCHING", $"Removing last chunk from previous panel to avoid overlap");
-                        allChunks.RemoveAt(allChunks.Count - 1);
-                    }
-                    allChunks.AddRange(panelChunks);
-                }
+
+                // Add all chunks from current panel
+                allChunks.AddRange(panelChunks);
 
                 onStream?.Invoke(0, $"@panel:chunks Panel {i + 1} complete: {panelChunks.Count} chunks added");
             }
 
-            // Renumber chunks to ensure continuous indexing
+            // Re-index all chunks
             for (int i = 0; i < allChunks.Count; i++)
             {
                 allChunks[i] = allChunks[i] with { Index = i };
             }
 
-            LogDebug("PANELIZATION_COMPLETE", $"Panelization complete: {allChunks.Count} total chunks");
-            onStream?.Invoke(0, $"@panel:complete Panelization complete: {allChunks.Count} total chunks");
-
-            if (_lastStatistics != null)
-                _lastStatistics.PanelCount = panels.Count;
+            onStream?.Invoke(0, $"@panel:complete Assembled {allChunks.Count} chunks from {panels.Count} panels");
 
             return allChunks;
         }
 
-        private List<TokenPanel> BuildTokenPanels(string text, int targetTokens, int overlapTokens)
-        {
-            var allTokens = _enc.EncodeToIds(text);
-            var panels = new List<TokenPanel>();
-
-            int stride = targetTokens - overlapTokens;
-            if (stride <= 0) stride = 1;
-
-            for (int start = 0; start < allTokens.Count; start += stride)
-            {
-                int end = Math.Min(start + targetTokens, allTokens.Count);
-                var panelTokens = allTokens.Skip(start).Take(end - start).ToArray();
-                var panelText = _enc.Decode(panelTokens);
-
-                panels.Add(new TokenPanel(panelText, start, end));
-
-                if (end >= allTokens.Count) break;
-            }
-
-            return panels;
-        }
-
-        private record TokenPanel(string Text, int StartTokenIndex, int EndTokenIndex);
-
         private string BuildChunkingPrompt(string text, bool isPanel)
         {
             var prompt = new StringBuilder();
-            prompt.AppendLine("Please chunk this document into semantic sections suitable for RAG.");
-            prompt.AppendLine("Requirements:");
-            prompt.AppendLine("- Each chunk should be 400-600 tokens");
-            prompt.AppendLine("- Preserve semantic boundaries (don't split sentences)");
-            prompt.AppendLine("- Maintain original formatting including markdown");
+
+            prompt.AppendLine("You are a document chunking specialist. Your task is to split the following document into semantically coherent chunks suitable for a RAG system.");
             prompt.AppendLine();
-            prompt.AppendLine("Return ONLY the chunks separated by '---CHUNK---' markers.");
+            prompt.AppendLine("REQUIREMENTS:");
+            prompt.AppendLine("1. Each chunk should be approximately 300-500 tokens (roughly 200-400 words)");
+            prompt.AppendLine("2. Maintain semantic boundaries - don't split sentences or paragraphs mid-way");
+            prompt.AppendLine("3. Preserve the original text exactly, including all formatting, punctuation, and whitespace");
+            prompt.AppendLine("4. Each chunk should be self-contained enough to be understood independently");
+            prompt.AppendLine("5. Keep related information together (e.g., a heading with its content)");
             prompt.AppendLine();
-            prompt.AppendLine("Document:");
+            prompt.AppendLine("OUTPUT FORMAT:");
+            prompt.AppendLine("- Output ONLY the chunked text with separators");
+            prompt.AppendLine("- Do NOT add any explanations, numbering, or commentary");
+            prompt.AppendLine("- Separate each chunk with EXACTLY this line (on its own line): ---CHUNK---");
+            prompt.AppendLine("- Do NOT include ---CHUNK--- before the first chunk or after the last chunk");
+            prompt.AppendLine();
+            prompt.AppendLine("EXAMPLE OUTPUT FORMAT:");
+            prompt.AppendLine("First chunk content here...");
+            prompt.AppendLine("---CHUNK---");
+            prompt.AppendLine("Second chunk content here...");
+            prompt.AppendLine("---CHUNK---");
+            prompt.AppendLine("Third chunk content here...");
+            prompt.AppendLine();
+            prompt.AppendLine("Document to chunk:");
+            prompt.AppendLine("================================================================================");
             prompt.AppendLine(text);
+            prompt.AppendLine("================================================================================");
 
             return prompt.ToString();
         }
 
-        private string BuildPanelPrompt(string text, int panelNumber, int totalPanels, bool hasOverlap)
+        private string BuildPanelPrompt(string panelText, int panelNumber, int totalPanels, bool hasOverlap)
         {
             var prompt = new StringBuilder();
+
             prompt.AppendLine($"You are processing panel {panelNumber} of {totalPanels} from a larger document.");
+            prompt.AppendLine();
+            prompt.AppendLine("REQUIREMENTS:");
+            prompt.AppendLine("1. Create chunks of approximately 300-500 tokens each");
+            prompt.AppendLine("2. Maintain semantic boundaries - don't split sentences mid-way");
+            prompt.AppendLine("3. Preserve the original text exactly, including all formatting");
 
             if (hasOverlap)
             {
-                prompt.AppendLine($"IMPORTANT: The first ~{_overlapTokens} tokens are overlap from the previous panel for context.");
-                prompt.AppendLine("Start your first NEW chunk AFTER this overlap region.");
+                prompt.AppendLine($"4. IMPORTANT: The first {_overlapTokens} tokens are overlap from the previous panel for context.");
+                prompt.AppendLine("   Start your FIRST chunk immediately AFTER this overlap section.");
+                prompt.AppendLine("   Do not include the overlap text in any of your chunks.");
             }
 
             prompt.AppendLine();
-            prompt.AppendLine("Chunk this panel into semantic sections (400-600 tokens each).");
-            prompt.AppendLine("Return ONLY the chunks separated by '---CHUNK---' markers.");
+            prompt.AppendLine("OUTPUT FORMAT:");
+            prompt.AppendLine("- Output ONLY the chunked text with separators");
+            prompt.AppendLine("- Separate chunks with EXACTLY this line: ---CHUNK---");
+            prompt.AppendLine("- No explanations, numbering, or commentary");
             prompt.AppendLine();
             prompt.AppendLine("Panel text:");
-            prompt.AppendLine(text);
+            prompt.AppendLine("================================================================================");
+            prompt.AppendLine(panelText);
+            prompt.AppendLine("================================================================================");
 
             return prompt.ToString();
         }
@@ -373,27 +365,28 @@ namespace PrivacyLens.Services
             {
                 var messages = new List<ChatMessage>
                 {
-                    new SystemChatMessage("You are a document processing assistant specialized in intelligent text chunking for RAG systems."),
+                    new SystemChatMessage("You are a document processing assistant specialized in intelligent text chunking for RAG systems. Follow the instructions precisely and output only what is requested."),
                     new UserChatMessage(prompt)
+                };
+
+                var options = new ChatCompletionOptions
+                {
+                    MaxOutputTokenCount = _maxOutputTokenCount,
+                    Temperature = 0.3f  // Lower temperature for more consistent output
                 };
 
                 if (_useStreaming && onStream != null)
                 {
+                    // If we want streaming, collect the response but DON'T report each token
                     var response = new StringBuilder();
-                    var options = new ChatCompletionOptions
-                    {
-                        MaxOutputTokenCount = _maxOutputTokenCount
-                    };
 
                     await foreach (var update in _chatClient.CompleteChatStreamingAsync(messages, options, ct))
                     {
                         foreach (var part in update.ContentUpdate)
                         {
-                            response.Append(part.Text);
-                            // Filter out stats messages from streaming to user
-                            if (part.Text != null && !part.Text.StartsWith("@"))
+                            if (part.Text != null)
                             {
-                                onStream(response.Length, part.Text);
+                                response.Append(part.Text);
                             }
                         }
                     }
@@ -402,11 +395,7 @@ namespace PrivacyLens.Services
                 }
                 else
                 {
-                    var options = new ChatCompletionOptions
-                    {
-                        MaxOutputTokenCount = _maxOutputTokenCount
-                    };
-
+                    // Non-streaming path
                     var result = await _chatClient.CompleteChatAsync(messages, options, ct);
                     return result.Value.Content[0].Text;
                 }
@@ -422,34 +411,74 @@ namespace PrivacyLens.Services
         {
             try
             {
-                // Try to parse as chunks separated by markers
+                // Clean up the response
+                response = response?.Trim() ?? string.Empty;
+
+                if (string.IsNullOrWhiteSpace(response))
+                {
+                    LogError("PARSE_ERROR", "Empty response from GPT");
+                    return new List<ChunkRecord>();
+                }
+
+                // Log the first 500 chars of response for debugging
+                LogDebug("PARSE_START", $"Response preview: {response.Substring(0, Math.Min(500, response.Length))}...");
+
                 var chunks = new List<ChunkRecord>();
                 var separator = "---CHUNK---";
-                var parts = response.Split(new[] { separator }, StringSplitOptions.RemoveEmptyEntries);
 
+                // Split by the separator
+                var parts = response.Split(new[] { separator }, StringSplitOptions.None);
+
+                LogDebug("PARSE_SPLIT", $"Response split into {parts.Length} parts");
+
+                // Process each part
                 for (int i = 0; i < parts.Length; i++)
                 {
                     var content = parts[i].Trim();
-                    if (!string.IsNullOrWhiteSpace(content))
+
+                    // Skip empty chunks
+                    if (string.IsNullOrWhiteSpace(content))
                     {
+                        LogDebug("PARSE_SKIP", $"Skipping empty part {i + 1}");
+                        continue;
+                    }
+
+                    // Skip very short chunks (less than 50 chars is probably an error)
+                    if (content.Length < 50)
+                    {
+                        LogDebug("PARSE_WARNING", $"Skipping very short chunk ({content.Length} chars): {content.Substring(0, Math.Min(content.Length, 50))}");
+                        continue;
+                    }
+
+                    chunks.Add(new ChunkRecord(
+                        Index: chunks.Count,
+                        Content: content,
+                        DocumentPath: documentPath ?? "unknown",
+                        Embedding: Array.Empty<float>()
+                    ));
+
+                    LogDebug("PARSE_CHUNK", $"Added chunk {chunks.Count}: {content.Length} chars, ~{CountTokens(content)} tokens");
+                }
+
+                if (chunks.Count == 0)
+                {
+                    LogError("PARSE_ERROR", "No valid chunks found in response");
+
+                    // Fallback: if the response looks substantial, treat it as a single chunk
+                    if (!string.IsNullOrWhiteSpace(response) && response.Length > 100)
+                    {
+                        LogDebug("PARSE_FALLBACK", "Using entire response as single chunk");
                         chunks.Add(new ChunkRecord(
-                            Index: i,
-                            Content: content,
+                            Index: 0,
+                            Content: response,
                             DocumentPath: documentPath ?? "unknown",
                             Embedding: Array.Empty<float>()
                         ));
                     }
                 }
-
-                if (chunks.Count == 0)
+                else
                 {
-                    LogError("PARSE_ERROR", "No chunks found in response, treating entire response as single chunk");
-                    chunks.Add(new ChunkRecord(
-                        Index: 0,
-                        Content: response,
-                        DocumentPath: documentPath ?? "unknown",
-                        Embedding: Array.Empty<float>()
-                    ));
+                    LogDebug("PARSE_SUCCESS", $"Successfully parsed {chunks.Count} chunks");
                 }
 
                 return chunks;
@@ -457,22 +486,86 @@ namespace PrivacyLens.Services
             catch (Exception ex)
             {
                 LogError("PARSE_ERROR", $"Error parsing response: {ex.Message}", ex);
-                // Fallback: treat entire response as single chunk
-                return new List<ChunkRecord>
+
+                // Last resort fallback
+                if (!string.IsNullOrWhiteSpace(response))
                 {
-                    new ChunkRecord(
-                        Index: 0,
-                        Content: response,
-                        DocumentPath: documentPath ?? "unknown",
-                        Embedding: Array.Empty<float>()
-                    )
-                };
+                    return new List<ChunkRecord>
+                    {
+                        new ChunkRecord(
+                            Index: 0,
+                            Content: response,
+                            DocumentPath: documentPath ?? "unknown",
+                            Embedding: Array.Empty<float>()
+                        )
+                    };
+                }
+
+                return new List<ChunkRecord>();
             }
         }
 
+        private List<TokenPanel> BuildTokenPanels(string text, int targetPanelSize, int overlapSize)
+        {
+            var panels = new List<TokenPanel>();
+            var tokens = _enc.EncodeToIds(text);
+
+            if (tokens.Count <= targetPanelSize)
+            {
+                // Document fits in a single panel
+                panels.Add(new TokenPanel(text, 0, tokens.Count - 1));
+                return panels;
+            }
+
+            int position = 0;
+            while (position < tokens.Count)
+            {
+                int startPos = position;
+                int endPos = Math.Min(position + targetPanelSize, tokens.Count);
+
+                // Extract text for this panel
+                var panelTokens = tokens.Skip(startPos).Take(endPos - startPos).ToArray();
+                var panelText = _enc.Decode(panelTokens);
+
+                panels.Add(new TokenPanel(panelText, startPos, endPos - 1));
+
+                // Move position forward, accounting for overlap
+                position = endPos - overlapSize;
+
+                // Prevent infinite loop if overlap is too large
+                if (position <= startPos)
+                {
+                    position = endPos;
+                }
+
+                // If we're close to the end, just include everything in the last panel
+                if (tokens.Count - position < overlapSize)
+                {
+                    break;
+                }
+            }
+
+            LogDebug("PANELS", $"Created {panels.Count} panels from {tokens.Count} tokens");
+            return panels;
+        }
+
+        private record TokenPanel(string Text, int StartTokenIndex, int EndTokenIndex);
+
         private int CountTokens(string text)
         {
-            return _enc.EncodeToIds(text).Count;
+            if (string.IsNullOrWhiteSpace(text))
+                return 0;
+
+            try
+            {
+                return _enc.EncodeToIds(text).Count;
+            }
+            catch (Exception ex)
+            {
+                LogError("TOKEN_COUNT_ERROR", $"Error counting tokens: {ex.Message}", ex);
+                // Fallback to rough estimate
+                return text.Length / 4;
+            }
         }
 
         #endregion

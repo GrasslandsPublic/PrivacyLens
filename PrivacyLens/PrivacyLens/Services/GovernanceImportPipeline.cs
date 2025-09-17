@@ -1,4 +1,4 @@
-﻿// Services/GovernanceImportPipeline.cs — Patched
+﻿// Services/GovernanceImportPipeline.cs — Fixed
 // - Adds ImportTextAsync for direct text ingestion with progress
 // - Adds IsLikelyPdfFile() and PDF signature check in ExtractPdf()
 // - Keeps existing GPT panelized chunking pipeline for files
@@ -109,16 +109,16 @@ namespace PrivacyLens.Services
             for (int i = 0; i < total; i++)
             {
                 var file = files[i];
-                var name = Path.GetFileName(file);
-                progress?.Report(new ImportProgress(i + 1, total, name, "Start"));
+                var fileName = Path.GetFileName(file); // Using fileName instead of name for clarity
+                progress?.Report(new ImportProgress(i + 1, total, fileName, "Start"));
                 try
                 {
                     await ImportAsync(file, progress, i + 1, total, ct);
-                    progress?.Report(new ImportProgress(i + 1, total, name, "Done"));
+                    progress?.Report(new ImportProgress(i + 1, total, fileName, "Done"));
                 }
                 catch (Exception ex)
                 {
-                    progress?.Report(new ImportProgress(i + 1, total, name, "Error", ex.Message));
+                    progress?.Report(new ImportProgress(i + 1, total, fileName, "Error", ex.Message));
                     throw;
                 }
             }
@@ -135,28 +135,28 @@ namespace PrivacyLens.Services
             int total = 1,
             CancellationToken ct = default)
         {
-            var name = Path.GetFileName(syntheticPath);
-            var safeName = TraceLog.MakeFileSafe(name);
+            var fileName = Path.GetFileName(syntheticPath);
+            var safeName = TraceLog.MakeFileSafe(fileName);
             var tracesDir = Path.Combine(AppContext.BaseDirectory, ".diagnostics", "traces");
             await using var trace = new TraceLog(tracesDir, safeName);
-            await trace.InitAsync($"ingestion text trace for {name}");
+            await trace.InitAsync($"ingestion text trace for {fileName}");
 
             // 1) Chunk
             var sw = Stopwatch.StartNew();
-            progress?.Report(new ImportProgress(current, total, name, "Chunk"));
+            progress?.Report(new ImportProgress(current, total, fileName, "Chunk"));
             IReadOnlyList<ChunkRecord> chunks = await _chunking.ChunkAsync(text, syntheticPath,
                 onStream: (chars, preview) =>
                 {
                     if (!string.IsNullOrEmpty(preview))
-                        progress?.Report(new ImportProgress(current, total, name, "Chunk", SanitizeProgress(preview)));
+                        progress?.Report(new ImportProgress(current, total, fileName, "Chunk", SanitizeProgress(preview)));
                 }, ct);
             sw.Stop();
             await trace.WriteLineAsync($"CHUNK ok chunks={chunks.Count:N0}");
             if (_showStageDurations)
-                progress?.Report(new ImportProgress(current, total, name, "Chunk", StageElapsedMs: sw.ElapsedMilliseconds));
+                progress?.Report(new ImportProgress(current, total, fileName, "Chunk", StageElapsedMs: sw.ElapsedMilliseconds));
 
             // 2) Embed + Save
-            progress?.Report(new ImportProgress(current, total, name, "Embed+Save", $"chunks={chunks.Count}"));
+            progress?.Report(new ImportProgress(current, total, fileName, "Embed+Save", $"chunks={chunks.Count}"));
             var embedSw = Stopwatch.StartNew();
             var materialized = new List<ChunkRecord>(chunks.Count);
 
@@ -179,21 +179,22 @@ namespace PrivacyLens.Services
 
                 materialized.Add(ch with { Embedding = embedding });
                 progress?.Report(new ImportProgress(
-                    current, total, name, "Embed",
+                    current, total, fileName, "Embed",
                     $"chunk {i + 1}/{chunks.Count} tok={tok} emb_dim={embedding.Length} {perSw.ElapsedMilliseconds}ms"));
             }
 
             embedSw.Stop();
             if (_showStageDurations)
-                progress?.Report(new ImportProgress(current, total, name, "Embed", StageElapsedMs: embedSw.ElapsedMilliseconds));
+                progress?.Report(new ImportProgress(current, total, fileName, "Embed", StageElapsedMs: embedSw.ElapsedMilliseconds));
 
-            // Save
+            // Save with simple progress
             var saveSw = Stopwatch.StartNew();
-            progress?.Report(new ImportProgress(current, total, name, "Save", $"writing {materialized.Count} chunks..."));
+            progress?.Report(new ImportProgress(current, total, fileName, "Save", $"writing {materialized.Count} chunks..."));
             await _store.SaveChunksAsync(materialized, ct);
+            progress?.Report(new ImportProgress(current, total, fileName, "Save", $"saved {materialized.Count} chunks"));
             saveSw.Stop();
             if (_showStageDurations)
-                progress?.Report(new ImportProgress(current, total, name, "Save", StageElapsedMs: saveSw.ElapsedMilliseconds));
+                progress?.Report(new ImportProgress(current, total, fileName, "Save", StageElapsedMs: saveSw.ElapsedMilliseconds));
         }
 
         public async Task ImportAsync(
@@ -206,48 +207,39 @@ namespace PrivacyLens.Services
             if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
                 throw new FileNotFoundException("File not found.", filePath);
 
-            var name = Path.GetFileName(filePath);
-            var safeName = TraceLog.MakeFileSafe(name);
+            var fileName = Path.GetFileName(filePath);
+            var safeName = TraceLog.MakeFileSafe(fileName);
             var tracesDir = Path.Combine(AppContext.BaseDirectory, ".diagnostics", "traces");
             await using var trace = new TraceLog(tracesDir, safeName);
-            await trace.InitAsync($"ingestion trace for {name}");
+            await trace.InitAsync($"ingestion trace for {fileName}");
 
             // 1) Extract
             var sw = Stopwatch.StartNew();
-            progress?.Report(new ImportProgress(current, total, name, "Extract"));
+            progress?.Report(new ImportProgress(current, total, fileName, "Extract"));
             var text = ExtractTextFromFile(filePath);
             sw.Stop();
             await trace.WriteLineAsync($"EXTRACT ok chars={text.Length:N0} tok={CountTokens(text):N0}");
             if (_showStageDurations)
-                progress?.Report(new ImportProgress(current, total, name, "Extract", StageElapsedMs: sw.ElapsedMilliseconds));
+                progress?.Report(new ImportProgress(current, total, fileName, "Extract", StageElapsedMs: sw.ElapsedMilliseconds));
 
             // 2) Chunk
             sw.Restart();
             var approxPromptTok = CountTokens(text);
-            progress?.Report(new ImportProgress(current, total, name, "Chunk", $"~{approxPromptTok:N0} prompt tok (est)"));
+            progress?.Report(new ImportProgress(current, total, fileName, "Chunk", $"~{approxPromptTok:N0} tokens"));
 
-            Action<int, string> onStream = (chars, preview) =>
-            {
-                if (string.IsNullOrEmpty(preview)) return;
-                if (preview.StartsWith("@panel:"))
+            IReadOnlyList<ChunkRecord> chunks = await _chunking.ChunkAsync(text, filePath,
+                onStream: (chars, preview) =>
                 {
-                    var status = preview.Substring("@panel:".Length).Trim();
-                    if (!status.StartsWith("info ", StringComparison.OrdinalIgnoreCase))
-                        progress?.Report(new ImportProgress(current, total, name, "Chunk", status));
-                    return;
-                }
-                var clean = SanitizeProgress(preview);
-                if (!string.IsNullOrEmpty(clean))
-                    progress?.Report(new ImportProgress(current, total, name, "Chunk", clean));
-            };
+                    if (!string.IsNullOrEmpty(preview))
+                        progress?.Report(new ImportProgress(current, total, fileName, "Chunk", SanitizeProgress(preview)));
+                }, ct);
 
-            IReadOnlyList<ChunkRecord> chunks = await _chunking.ChunkAsync(text, filePath, onStream, ct);
             sw.Stop();
+            await trace.WriteLineAsync($"CHUNK ok chunks={chunks.Count:N0}");
             if (_showStageDurations)
-                progress?.Report(new ImportProgress(current, total, name, "Chunk", StageElapsedMs: sw.ElapsedMilliseconds));
+                progress?.Report(new ImportProgress(current, total, fileName, "Chunk", StageElapsedMs: sw.ElapsedMilliseconds));
 
-            // 3) Embed + Save with dimension guard
-            progress?.Report(new ImportProgress(current, total, name, "Embed+Save", $"chunks={chunks.Count}"));
+            // 3) Embed each chunk
             var embedSw = Stopwatch.StartNew();
             var materialized = new List<ChunkRecord>(chunks.Count);
 
@@ -270,22 +262,36 @@ namespace PrivacyLens.Services
 
                 materialized.Add(ch with { Embedding = embedding });
                 progress?.Report(new ImportProgress(
-                    current, total, name, "Embed",
+                    current, total, fileName, "Embed",
                     $"chunk {i + 1}/{chunks.Count} tok={tok} emb_dim={embedding.Length} {perSw.ElapsedMilliseconds}ms"));
             }
 
             embedSw.Stop();
             if (_showStageDurations)
-                progress?.Report(new ImportProgress(current, total, name, "Embed", StageElapsedMs: embedSw.ElapsedMilliseconds));
+                progress?.Report(new ImportProgress(current, total, fileName, "Embed", StageElapsedMs: embedSw.ElapsedMilliseconds));
 
-            // Save with simple progress
+            // Save
             var saveSw = Stopwatch.StartNew();
-            progress?.Report(new ImportProgress(current, total, name, "Save", $"writing {materialized.Count} chunks..."));
+            progress?.Report(new ImportProgress(current, total, fileName, "Save", $"writing {materialized.Count} chunks..."));
             await _store.SaveChunksAsync(materialized, ct);
-            progress?.Report(new ImportProgress(current, total, name, "Save", $"saved {materialized.Count} chunks"));
             saveSw.Stop();
             if (_showStageDurations)
-                progress?.Report(new ImportProgress(current, total, name, "Save", StageElapsedMs: saveSw.ElapsedMilliseconds));
+                progress?.Report(new ImportProgress(current, total, fileName, "Save", StageElapsedMs: saveSw.ElapsedMilliseconds));
+        }
+
+        private static string SanitizeProgress(string input)
+        {
+            if (string.IsNullOrEmpty(input)) return "";
+
+            // Remove problematic characters that might interfere with console output
+            var sanitized = Regex.Replace(input, @"[\r\n\t]", " ");
+            sanitized = Regex.Replace(sanitized, @"\s+", " ").Trim();
+
+            // Truncate if too long
+            if (sanitized.Length > 100)
+                sanitized = sanitized.Substring(0, 97) + "...";
+
+            return sanitized;
         }
 
         private static int CountTokens(string text) => Tok.CountTokens(text);
@@ -293,7 +299,7 @@ namespace PrivacyLens.Services
         private static bool HasSupportedExtension(string filePath)
         {
             var ext = Path.GetExtension(filePath).ToLowerInvariant();
-            return ext is ".pdf" or ".docx" or ".pptx" or ".xlsx";
+            return ext is ".pdf" or ".docx" or ".pptx" or ".xlsx" or ".txt" or ".csv";
         }
 
         private static string ExtractTextFromFile(string filePath)
@@ -304,6 +310,8 @@ namespace PrivacyLens.Services
                 ".docx" => ExtractDocx(filePath),
                 ".pptx" => ExtractPptx(filePath),
                 ".xlsx" => ExtractXlsx(filePath),
+                ".txt" => File.ReadAllText(filePath),
+                ".csv" => File.ReadAllText(filePath),
                 var ext => throw new NotSupportedException($"Unsupported file type: {ext}")
             };
         }
@@ -383,67 +391,49 @@ namespace PrivacyLens.Services
 
             foreach (var sheet in sheets)
             {
-                var relId = sheet.Id?.Value;
-                if (string.IsNullOrEmpty(relId)) continue;
-                var wsPart = (WorksheetPart)wbPart.GetPartById(relId);
-                var sheetData = wsPart.Worksheet.GetFirstChild<SheetData>();
-                if (sheetData is null) continue;
+                if (string.IsNullOrWhiteSpace(sheet.Id?.Value)) continue;
 
-                sb.AppendLine($"# Sheet: {sheet.Name}");
-                foreach (var row in sheetData.Elements<Row>())
+                var wsPart = wbPart.GetPartById(sheet.Id.Value) as WorksheetPart;
+                if (wsPart?.Worksheet == null) continue;
+
+                sb.AppendLine($"Sheet: {sheet.Name}");
+                var sheetData = wsPart.Worksheet.GetFirstChild<SheetData>();
+                if (sheetData == null) continue;
+
+                foreach (var row in sheetData.Descendants<Row>())
                 {
-                    var cellValues = new List<string>();
-                    foreach (var cell in row.Elements<Cell>())
-                        cellValues.Add(GetCellDisplayString(cell, wbPart, sst));
-                    if (cellValues.Count > 0)
-                        sb.AppendLine(string.Join('\t', cellValues));
+                    var cells = row.Descendants<Cell>();
+                    var rowText = new List<string>();
+
+                    foreach (var cell in cells)
+                    {
+                        var cellValue = GetCellValue(cell, sst);
+                        if (!string.IsNullOrWhiteSpace(cellValue))
+                            rowText.Add(cellValue);
+                    }
+
+                    if (rowText.Any())
+                        sb.AppendLine(string.Join("\t", rowText));
                 }
                 sb.AppendLine();
             }
-
             return sb.ToString();
         }
 
-        private static string GetCellDisplayString(Cell cell, WorkbookPart wbPart, SharedStringTable? sst)
+        private static string GetCellValue(Cell cell, SharedStringTable? sst)
         {
-            if (cell == null) return string.Empty;
+            if (cell.CellValue == null) return string.Empty;
 
+            var value = cell.CellValue.Text;
             if (cell.DataType?.Value == CellValues.SharedString && sst != null)
             {
-                var idxText = cell.CellValue?.InnerText;
-                if (int.TryParse(idxText, out var idx) && idx >= 0)
+                if (int.TryParse(value, out var index))
                 {
-                    var si = sst.Elements<SharedStringItem>().ElementAtOrDefault(idx);
-                    return si?.InnerText ?? string.Empty;
+                    var sstItem = sst.ChildElements[index];
+                    return sstItem.InnerText;
                 }
-                return string.Empty;
             }
-
-            if (cell.DataType?.Value == CellValues.InlineString && cell.InlineString != null)
-                return cell.InlineString.InnerText ?? string.Empty;
-
-            if (cell.DataType?.Value == CellValues.Boolean)
-                return (cell.CellValue?.InnerText == "1") ? "TRUE" : "FALSE";
-
-            return cell.CellValue?.InnerText ?? string.Empty;
-        }
-
-        private static string SanitizeProgress(string s)
-        {
-            if (string.IsNullOrEmpty(s)) return string.Empty;
-            var sb = new StringBuilder(s.Length);
-            foreach (var c in s)
-            {
-                if (char.IsControl(c))
-                {
-                    if (c == '\n' || c == '\r' || c == '\t') sb.Append(' ');
-                }
-                else sb.Append(c);
-            }
-            var oneLine = sb.ToString();
-            var collapsed = Regex.Replace(oneLine, @"\s+", " ").Trim();
-            const int max = 200;
-            return (collapsed.Length <= max) ? collapsed : collapsed.Substring(0, max) + " …";
+            return value;
         }
     }
 }

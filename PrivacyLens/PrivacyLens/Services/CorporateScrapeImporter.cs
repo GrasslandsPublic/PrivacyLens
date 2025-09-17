@@ -1,4 +1,4 @@
-﻿// Services/CorporateScrapeImporter.cs - Enhanced with metadata extraction
+﻿// Services/CorporateScrapeImporter.cs - Fixed with proper DocumentSource enum
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -19,6 +19,18 @@ using HtmlAgilityPack;
 
 namespace PrivacyLens.Services
 {
+    /// <summary>
+    /// Enum for document sources (was missing from original code)
+    /// </summary>
+    public enum DocumentSource
+    {
+        Unknown,
+        WebScrape,
+        FileUpload,
+        Manual,
+        API
+    }
+
     /// <summary>
     /// Enhanced importer with comprehensive metadata extraction
     /// </summary>
@@ -67,6 +79,36 @@ namespace PrivacyLens.Services
             _store = new VectorStore(config);
         }
 
+        // Alternative constructor if being called with UnifiedDocumentProcessor
+        public CorporateScrapeImporter(UnifiedDocumentProcessor processor, IConfiguration config, ILogger<CorporateScrapeImporter> logger)
+        {
+            _config = config;
+            _debugMode = config.GetValue<bool>("AzureOpenAI:Diagnostics:Verbose", false);
+
+            // Initialize tokenizer for statistics
+            _tokenEncoder = GptEncoding.GetEncodingForModel("gpt-4");
+
+            // Create a logger for GptChunkingService
+            var loggerFactory = LoggerFactory.Create(builder =>
+            {
+                builder.SetMinimumLevel(_debugMode ? LogLevel.Debug : LogLevel.Information);
+            });
+            _logger = loggerFactory.CreateLogger<GptChunkingService>();
+
+            // Initialize services - we'll create our own pipeline
+            var chunker = new GptChunkingService(config, _logger);
+            _embed = new EmbeddingService(config);
+            _store = new VectorStore(config);
+            _pipeline = new GovernanceImportPipeline(chunker, _embed, _store, config);
+
+            // HTML hybrid chunking components
+            var boiler = new SimpleBoilerplateFilter();
+            var seg = new HtmlDomSegmenter(boiler);
+            var simple = new SimpleTextChunker();
+            var gpt = new GptChunkingService(config, _logger);
+            _htmlOrchestrator = new HybridChunkingOrchestrator(seg, simple, gpt, config);
+        }
+
         public async Task ImportScrapeAsync(string scrapeRoot, CancellationToken ct = default)
         {
             var pagesDir = Path.Combine(scrapeRoot, "webpages");
@@ -101,7 +143,7 @@ namespace PrivacyLens.Services
                 : Array.Empty<string>();
 
             Console.WriteLine($" 📄 HTML pages found: {htmlFiles.Length}");
-            Console.WriteLine($" 📑 Documents found: {docFiles.Length}");
+            Console.WriteLine($" 📎 Documents found: {docFiles.Length}");
             Console.WriteLine();
 
             // Process HTML files
@@ -110,7 +152,7 @@ namespace PrivacyLens.Services
                 Console.WriteLine("========================================");
                 Console.WriteLine("PROCESSING HTML PAGES");
                 Console.WriteLine("========================================");
-                await reportWriter.WriteLineAsync("=== HTML PAGES ===");
+                await reportWriter.WriteLineAsync("\n=== HTML PAGES ===");
 
                 for (int i = 0; i < htmlFiles.Length; i++)
                 {
@@ -121,87 +163,53 @@ namespace PrivacyLens.Services
 
                     try
                     {
-                        // Read HTML content
-                        var content = await File.ReadAllTextAsync(htmlPath, ct);
-                        var fileSize = new FileInfo(htmlPath).Length;
+                        var htmlContent = await File.ReadAllTextAsync(htmlPath, ct);
 
-                        if (_debugMode)
-                        {
-                            Console.WriteLine($"  • File size: {fileSize:N0} bytes");
-                            Console.WriteLine($"  • Content length: {content.Length:N0} chars");
-                        }
-
-                        if (content.Length < 100)
+                        if (string.IsNullOrWhiteSpace(htmlContent) || htmlContent.Length < 100)
                         {
                             Console.ForegroundColor = ConsoleColor.Yellow;
-                            Console.WriteLine($"  ⚠ SKIPPED: Too short ({content.Length} chars < 100)");
+                            Console.WriteLine($"  ⚠ SKIP: Too small ({htmlContent.Length} chars)");
                             Console.ResetColor();
-                            await reportWriter.WriteLineAsync($"SKIP: {name} - Too short ({content.Length} chars)");
+                            await reportWriter.WriteLineAsync($"SKIP: {name} - Empty/small");
                             htmlEmpty++;
                             continue;
                         }
 
-                        // Extract metadata from HTML
-                        var htmlMetadata = ExtractHtmlMetadata(content, htmlPath);
+                        // Extract metadata
+                        var htmlMetadata = ExtractHtmlMetadata(htmlContent, htmlPath);
+                        Console.WriteLine($"  • Title: {htmlMetadata.Title ?? "No title"}");
+                        Console.WriteLine($"  • Word count: {htmlMetadata.WordCount:N0}");
 
-                        // Chunk HTML using hybrid strategy
-                        if (_debugMode)
-                            Console.WriteLine($"  • Chunking HTML content...");
+                        // Process with hybrid orchestrator
+                        Console.Write("  • Chunking with hybrid strategy");
+                        var chunks = await _htmlOrchestrator.ChunkHtmlAsync(
+                            htmlContent,
+                            Path.GetFileName(htmlPath),
+                            ct
+                        );
+                        Console.WriteLine($" → {chunks.Count} chunks");
 
-                        var chunks = await _htmlOrchestrator.ChunkHtmlAsync(content, htmlPath, ct);
-
-                        if (chunks == null || chunks.Count == 0)
-                        {
-                            Console.ForegroundColor = ConsoleColor.Yellow;
-                            Console.WriteLine($"  ⚠ WARNING: No chunks generated");
-                            Console.ResetColor();
-                            await reportWriter.WriteLineAsync($"WARN: {name} - No chunks generated");
-                            htmlEmpty++;
-                            continue;
-                        }
-
-                        Console.WriteLine($"   Generated {chunks.Count} chunks");
-                        if (_debugMode)
-                        {
-                            Console.WriteLine($"   Title: {htmlMetadata.Title ?? "Not found"}");
-                            Console.WriteLine($"   Type: {htmlMetadata.DocumentType}");
-                        }
-
-                        // Generate embeddings and enrich chunks with metadata
+                        // Enrich chunks
+                        Console.Write("  • Enriching with embeddings");
                         var enrichedChunks = new List<ChunkRecord>();
-                        Console.Write($"   Generating embeddings and enriching metadata");
 
                         for (int j = 0; j < chunks.Count; j++)
                         {
-                            if (j % 5 == 0) Console.Write(".");
+                            ct.ThrowIfCancellationRequested();
 
                             var chunk = chunks[j];
-                            var tokenCount = _tokenEncoder.Encode(chunk.Content).Count;
-                            var embedding = await _embed.EmbedAsync(chunk.Content, ct);
+                            float[] embedding = await _embed.EmbedAsync(chunk.Content, ct);
 
-                            // Create enriched chunk with metadata
-                            var enrichedChunk = new ChunkRecord(
-                                Index: chunk.Index,
-                                Content: chunk.Content,
-                                DocumentPath: chunk.DocumentPath,
-                                Embedding: embedding
-                            )
+                            var enrichedChunk = chunk with
                             {
+                                Embedding = embedding,
                                 DocumentTitle = htmlMetadata.Title,
-                                DocumentType = htmlMetadata.DocumentType,
-                                SourceUrl = htmlMetadata.SourceUrl,  // Now contains actual URL from meta.json
-                                DocumentHash = htmlMetadata.Hash,
-                                TokenCount = tokenCount,
-                                ChunkingStrategy = "HybridHTML",
-                                DocumentCategory = ClassifyDocument(chunk.Content, htmlMetadata.Title),
-                                DocumentDate = htmlMetadata.PublishDate ?? htmlMetadata.ScrapedAt,
-                                ConfidenceScore = htmlMetadata.ValueScore,
+                                DocumentType = "HTML",
+                                SourceUrl = htmlMetadata.Url,
                                 Metadata = new Dictionary<string, object>
                                 {
-                                    ["filename"] = name,
-                                    ["filesize"] = fileSize,
-                                    ["import_date"] = DateTime.UtcNow.ToString("O"),
-                                    ["scraped_at"] = htmlMetadata.ScrapedAt?.ToString("O") ?? "",
+                                    ["source"] = DocumentSource.WebScrape.ToString(),  // Fixed: Using enum
+                                    ["title"] = htmlMetadata.Title ?? "",
                                     ["word_count"] = htmlMetadata.WordCount ?? 0,
                                     ["is_valuable"] = htmlMetadata.IsValuable ?? false,
                                     ["description"] = htmlMetadata.Description ?? "",
@@ -282,7 +290,7 @@ namespace PrivacyLens.Services
                         if (!supportedExtensions.Contains(ext))
                         {
                             Console.ForegroundColor = ConsoleColor.Yellow;
-                            Console.WriteLine($"  ⚠ SKIPPED: Unsupported file type ({ext})");
+                            Console.WriteLine($"  ? SKIPPED: Unsupported file type ({ext})");
                             Console.ResetColor();
                             await reportWriter.WriteLineAsync($"SKIP: {name} - Unsupported type");
                             docSkip++;
@@ -337,171 +345,73 @@ namespace PrivacyLens.Services
             Console.WriteLine("\n========================================");
             Console.WriteLine("IMPORT SUMMARY");
             Console.WriteLine("========================================");
-            Console.WriteLine($"HTML Pages:");
-            Console.WriteLine($"  ✓ Successful: {htmlOk}");
-            Console.WriteLine($"  ⚠ Empty/Skipped: {htmlEmpty}");
-            Console.WriteLine($"  ✗ Failed: {htmlErr}");
-            Console.WriteLine($"\nDocuments:");
-            Console.WriteLine($"  ✓ Successful: {docOk}");
-            Console.WriteLine($"  ⚠ Skipped: {docSkip}");
-            Console.WriteLine($"  🔒 Quarantined: {docQuarantined}");
-            Console.WriteLine($"  ✗ Failed: {docErr}");
-            Console.WriteLine();
+            Console.WriteLine($"📄 HTML Pages:");
+            Console.WriteLine($"   ✓ Success: {htmlOk}");
+            if (htmlEmpty > 0) Console.WriteLine($"   ⚠ Skipped: {htmlEmpty}");
+            if (htmlErr > 0) Console.WriteLine($"   ✗ Failed: {htmlErr}");
+
+            Console.WriteLine($"\n📎 Documents:");
+            Console.WriteLine($"   ✓ Success: {docOk}");
+            if (docSkip > 0) Console.WriteLine($"   ⚠ Skipped: {docSkip}");
+            if (docQuarantined > 0) Console.WriteLine($"   🔒 Quarantined: {docQuarantined}");
+            if (docErr > 0) Console.WriteLine($"   ✗ Failed: {docErr}");
+
+            Console.WriteLine("\n========================================");
+            Console.WriteLine($"Report saved to: {validationReportPath}");
 
             await reportWriter.WriteLineAsync($"\n=== SUMMARY ===");
             await reportWriter.WriteLineAsync($"HTML: OK={htmlOk}, Empty={htmlEmpty}, Error={htmlErr}");
             await reportWriter.WriteLineAsync($"Docs: OK={docOk}, Skip={docSkip}, Quarantine={docQuarantined}, Error={docErr}");
-            await reportWriter.WriteLineAsync($"Report generated: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-
-            Console.WriteLine($"📊 Validation report saved to: {validationReportPath}");
-
-            // Check vector store index
-            Console.WriteLine("\n🔍 Checking vector store index...");
-            try
-            {
-                await _store.InitializeAsync(ct);
-                Console.WriteLine("  ✓ Vector store index ready");
-            }
-            catch (Exception ex)
-            {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine($"  ⚠ Index creation warning: {ex.Message}");
-                Console.ResetColor();
-            }
-        }
-
-        private class HtmlMetadata
-        {
-            public string? Title { get; set; }
-            public string DocumentType { get; set; } = "html";
-            public string? SourceUrl { get; set; }
-            public string? Hash { get; set; }
-            public string? Description { get; set; }
-            public string? Author { get; set; }
-            public DateTime? PublishDate { get; set; }
-            public DateTime? ScrapedAt { get; set; }
-            public int? WordCount { get; set; }
-            public double? ValueScore { get; set; }
-            public bool? IsValuable { get; set; }
+            await reportWriter.WriteLineAsync($"Report completed: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
         }
 
         private HtmlMetadata ExtractHtmlMetadata(string html, string filePath)
         {
-            var metadata = new HtmlMetadata
-            {
-                DocumentType = "html",
-                SourceUrl = filePath // Default to filepath, will be overridden by meta.json
-            };
+            var metadata = new HtmlMetadata();
 
             try
             {
-                // First, try to load the corresponding meta.json file
-                var metaJsonPath = Path.ChangeExtension(filePath, ".meta.json");
-                if (File.Exists(metaJsonPath))
-                {
-                    try
-                    {
-                        var metaJson = File.ReadAllText(metaJsonPath);
-                        var metaData = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, object>>(metaJson);
-
-                        if (metaData != null)
-                        {
-                            // Extract URL (most important)
-                            if (metaData.TryGetValue("Url", out var url))
-                            {
-                                metadata.SourceUrl = url.ToString();
-                            }
-
-                            // Extract Title from meta.json
-                            if (metaData.TryGetValue("Title", out var title))
-                            {
-                                metadata.Title = title.ToString();
-                            }
-
-                            // Extract ScrapedAt
-                            if (metaData.TryGetValue("ScrapedAt", out var scrapedAt))
-                            {
-                                if (DateTime.TryParse(scrapedAt.ToString(), out var date))
-                                {
-                                    metadata.ScrapedAt = date;
-                                }
-                            }
-
-                            // Extract WordCount
-                            if (metaData.TryGetValue("WordCount", out var wordCount))
-                            {
-                                if (int.TryParse(wordCount.ToString(), out var count))
-                                {
-                                    metadata.WordCount = count;
-                                }
-                            }
-
-                            // Extract ValueScore
-                            if (metaData.TryGetValue("ValueScore", out var valueScore))
-                            {
-                                if (double.TryParse(valueScore.ToString(), out var score))
-                                {
-                                    metadata.ValueScore = score;
-                                }
-                            }
-
-                            // Extract IsValuable
-                            if (metaData.TryGetValue("IsValuable", out var isValuable))
-                            {
-                                if (bool.TryParse(isValuable.ToString(), out var valuable))
-                                {
-                                    metadata.IsValuable = valuable;
-                                }
-                            }
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"    Warning: Could not parse meta.json: {ex.Message}");
-                    }
-                }
-
-                // Parse HTML for additional metadata (as fallback or supplement)
                 var doc = new HtmlDocument();
                 doc.LoadHtml(html);
 
-                // Extract title from HTML if not already set from meta.json
-                if (string.IsNullOrWhiteSpace(metadata.Title))
-                {
-                    var titleNode = doc.DocumentNode.SelectSingleNode("//title");
-                    if (titleNode != null)
-                    {
-                        metadata.Title = HtmlEntity.DeEntitize(titleNode.InnerText).Trim();
-                    }
+                // Title extraction
+                metadata.Title = doc.DocumentNode.SelectSingleNode("//title")?.InnerText?.Trim()
+                    ?? doc.DocumentNode.SelectSingleNode("//h1")?.InnerText?.Trim()
+                    ?? doc.DocumentNode.SelectSingleNode("//meta[@property='og:title']")?.GetAttributeValue("content", "");
 
-                    // Try meta og:title as fallback
-                    if (string.IsNullOrWhiteSpace(metadata.Title))
-                    {
-                        var ogTitle = doc.DocumentNode.SelectSingleNode("//meta[@property='og:title']");
-                        if (ogTitle != null)
-                        {
-                            metadata.Title = ogTitle.GetAttributeValue("content", "");
-                        }
-                    }
-                }
+                // Description
+                metadata.Description = doc.DocumentNode.SelectSingleNode("//meta[@name='description']")?.GetAttributeValue("content", "")
+                    ?? doc.DocumentNode.SelectSingleNode("//meta[@property='og:description']")?.GetAttributeValue("content", "");
 
-                // Extract description
-                var descNode = doc.DocumentNode.SelectSingleNode("//meta[@name='description']");
-                if (descNode != null)
-                {
-                    metadata.Description = descNode.GetAttributeValue("content", "");
-                }
+                // Author
+                metadata.Author = doc.DocumentNode.SelectSingleNode("//meta[@name='author']")?.GetAttributeValue("content", "");
 
-                // Extract author
-                var authorNode = doc.DocumentNode.SelectSingleNode("//meta[@name='author']");
-                if (authorNode != null)
-                {
-                    metadata.Author = authorNode.GetAttributeValue("content", "");
-                }
+                // URL
+                metadata.Url = doc.DocumentNode.SelectSingleNode("//meta[@property='og:url']")?.GetAttributeValue("content", "")
+                    ?? doc.DocumentNode.SelectSingleNode("//link[@rel='canonical']")?.GetAttributeValue("href", "");
 
-                // Try to extract publish date from HTML
-                var dateNode = doc.DocumentNode.SelectSingleNode("//meta[@property='article:published_time']")
-                            ?? doc.DocumentNode.SelectSingleNode("//meta[@name='publish_date']");
+                // Clean text for analysis
+                var scriptNodes = doc.DocumentNode.SelectNodes("//script");
+                scriptNodes?.ToList().ForEach(n => n.Remove());
+
+                var styleNodes = doc.DocumentNode.SelectNodes("//style");
+                styleNodes?.ToList().ForEach(n => n.Remove());
+
+                var bodyNode = doc.DocumentNode.SelectSingleNode("//body") ?? doc.DocumentNode;
+                var text = bodyNode.InnerText;
+
+                // Clean up whitespace
+                text = Regex.Replace(text, @"\s+", " ");
+                metadata.TextContent = text.Trim();
+
+                // Word count
+                metadata.WordCount = text.Split(new[] { ' ', '\t', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries).Length;
+
+                // Determine if valuable
+                metadata.IsValuable = metadata.WordCount > 100;
+
+                // Try to extract date
+                var dateNode = doc.DocumentNode.SelectSingleNode("//meta[@name='publish_date']");
                 if (dateNode != null)
                 {
                     var dateStr = dateNode.GetAttributeValue("content", "");
@@ -565,44 +475,39 @@ namespace PrivacyLens.Services
 
             // Reports and analysis
             if (combinedText.Contains("report") || combinedText.Contains("analysis") ||
-                combinedText.Contains("review") || combinedText.Contains("assessment") ||
-                combinedText.Contains("evaluation") || combinedText.Contains("findings"))
+                combinedText.Contains("assessment") || combinedText.Contains("evaluation"))
             {
                 return "Report";
             }
 
-            // Communications and announcements
-            if (combinedText.Contains("announcement") || combinedText.Contains("news") ||
-                combinedText.Contains("update") || combinedText.Contains("newsletter") ||
-                combinedText.Contains("bulletin") || combinedText.Contains("notice"))
-            {
-                return "Communications";
-            }
-
-            // Technical documentation
-            if (combinedText.Contains("technical") || combinedText.Contains("engineering") ||
-                combinedText.Contains("specification") || combinedText.Contains("implementation") ||
-                combinedText.Contains("architecture") || combinedText.Contains("system"))
-            {
-                return "Technical";
-            }
-
             // Forms and applications
             if (combinedText.Contains("form") || combinedText.Contains("application") ||
-                combinedText.Contains("registration") || combinedText.Contains("template"))
+                combinedText.Contains("submit") || combinedText.Contains("fill"))
             {
                 return "Form";
             }
 
-            // Administrative
-            if (combinedText.Contains("administrative") || combinedText.Contains("administration") ||
-                combinedText.Contains("office") || combinedText.Contains("staff"))
+            // Technical documentation
+            if (combinedText.Contains("technical") || combinedText.Contains("system") ||
+                combinedText.Contains("architecture") || combinedText.Contains("implementation"))
             {
-                return "Administrative";
+                return "Technical";
             }
 
-            // Default for web content
-            return "WebContent";
+            return null; // No classification
+        }
+
+        private class HtmlMetadata
+        {
+            public string? Title { get; set; }
+            public string? Description { get; set; }
+            public string? Author { get; set; }
+            public string? Url { get; set; }
+            public string? TextContent { get; set; }
+            public int? WordCount { get; set; }
+            public bool? IsValuable { get; set; }
+            public DateTime? PublishDate { get; set; }
+            public string? Hash { get; set; }
         }
     }
 }
