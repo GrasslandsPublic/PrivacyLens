@@ -457,9 +457,25 @@ namespace PrivacyLens.Services
             catch { return false; }
         }
 
+        // This is ONLY the InitializeBrowserAsync method with the Chrome download fix added
+        // Replace your existing InitializeBrowserAsync method with this one:
+
         private async Task InitializeBrowserAsync(bool antiDetection)
         {
-            var options = new LaunchOptions { Headless = true, Args = antiDetection ? new[] { "--disable-blink-features=AutomationControlled", "--no-sandbox" } : new[] { "--no-sandbox" } };
+            // Download Chrome if not present
+            var browserFetcher = new BrowserFetcher();
+            var revisionInfo = await browserFetcher.DownloadAsync();
+
+            // Use the downloaded Chrome executable
+            var options = new LaunchOptions
+            {
+                Headless = true,
+                ExecutablePath = revisionInfo.GetExecutablePath(),
+                Args = antiDetection
+                    ? new[] { "--disable-blink-features=AutomationControlled", "--no-sandbox" }
+                    : new[] { "--no-sandbox" }
+            };
+
             browser = await Puppeteer.LaunchAsync(options);
         }
 

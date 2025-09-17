@@ -1,10 +1,11 @@
-﻿// Menus/CorporateScrapingMenu.cs - Enhanced with smart scrape detection (CORRECTED)
+﻿// Menus/CorporateScrapingMenu.cs - Fixed ALL compilation errors
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using PrivacyLens.Services;
 using PrivacyLens.Models;
 
@@ -16,36 +17,44 @@ namespace PrivacyLens.Menus
         private readonly string corporateScrapesPath;
         private readonly WebScraperService scraperService;
         private readonly IConfiguration config;
-        private readonly GovernanceImportPipeline? importPipeline;
+        private readonly ILogger<GptChunkingService> _logger;
+        private GovernanceImportPipeline? importPipeline; // FIXED: Removed readonly so we can assign it later
 
-        public CorporateScrapingMenu()
+        // FIXED: Added proper constructor with required parameters
+        public CorporateScrapingMenu(IConfiguration configuration, ILogger<GptChunkingService> logger, GovernanceImportPipeline? pipeline)
         {
             appPath = AppDomain.CurrentDomain.BaseDirectory;
             corporateScrapesPath = Path.Combine(appPath, "governance", "corporate-scrapes");
             scraperService = new WebScraperService(appPath);
             Directory.CreateDirectory(corporateScrapesPath);
 
-            // Build configuration for importer
-            config = new ConfigurationBuilder()
-                .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
-                .AddEnvironmentVariables()
-                .Build();
+            config = configuration;
+            _logger = logger;
 
-            // Initialize import pipeline if configuration is valid
-            try
+            // Initialize import pipeline - always try to create one if not provided
+            if (pipeline != null)
             {
-                importPipeline = new GovernanceImportPipeline(
-                    new GptChunkingService(config),
-                    new EmbeddingService(config),
-                    new VectorStore(config),  // Fixed: was PostgresVectorStore
-                    config  // Fixed: config comes before logger
-                            // Logger is optional, can be null
-                );
+                importPipeline = pipeline;
             }
-            catch (Exception ex)
+            else
             {
-                Console.WriteLine($"Warning: Could not initialize import pipeline: {ex.Message}");
-                Console.WriteLine("Import functionality will be unavailable.");
+                try
+                {
+                    // Create a new pipeline with the logger
+                    importPipeline = new GovernanceImportPipeline(
+                        new GptChunkingService(config, _logger),
+                        new EmbeddingService(config),
+                        new VectorStore(config),
+                        config
+                    );
+                    Console.WriteLine("Import pipeline initialized successfully.");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Warning: Could not initialize import pipeline: {ex.Message}");
+                    Console.WriteLine("Import functionality will be unavailable.");
+                    importPipeline = null;
+                }
             }
         }
 
@@ -245,14 +254,29 @@ namespace PrivacyLens.Menus
             if (response == "n")
                 return;
 
+            // FIXED: Initialize pipeline here if it's null
             if (importPipeline == null)
             {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("\nError: Import pipeline not initialized. Check your configuration.");
-                Console.ResetColor();
-                Console.WriteLine("Press any key to continue...");
-                Console.ReadKey();
-                return;
+                try
+                {
+                    Console.WriteLine("\nInitializing import pipeline...");
+                    importPipeline = new GovernanceImportPipeline(
+                        new GptChunkingService(config, _logger),
+                        new EmbeddingService(config),
+                        new VectorStore(config),
+                        config
+                    );
+                    Console.WriteLine("Import pipeline initialized successfully.");
+                }
+                catch (Exception ex)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"\nError: Could not initialize import pipeline: {ex.Message}");
+                    Console.ResetColor();
+                    Console.WriteLine("Press any key to continue...");
+                    Console.ReadKey();
+                    return;
+                }
             }
 
             // Perform the import
@@ -260,15 +284,9 @@ namespace PrivacyLens.Menus
 
             try
             {
-                var progress = new Progress<ImportProgress>(p =>
-                {
-                    Console.SetCursorPosition(0, Console.CursorTop);
-                    // Fixed: Using correct property names from ImportProgress record
-                    var info = string.IsNullOrEmpty(p.Info) ? "" : $" - {p.Info}";
-                    Console.Write($"[{p.Current}/{p.Total}] {p.File}: {p.Stage}{info}".PadRight(100));
-                });
-
-                var task = ImportFilesAsync(scrape, progress);
+                // FIXED: Use CorporateScrapeImporter with correct constructor
+                var scrapeImporter = new CorporateScrapeImporter(importPipeline, config);
+                var task = scrapeImporter.ImportScrapeAsync(scrape.Path);
                 task.GetAwaiter().GetResult();
 
                 // Mark as imported
@@ -289,21 +307,6 @@ namespace PrivacyLens.Menus
 
             Console.WriteLine("\nPress any key to continue...");
             Console.ReadKey();
-        }
-
-        private async Task ImportFilesAsync(ScrapeInfo scrape, IProgress<ImportProgress> progress)
-        {
-            if (importPipeline == null)
-                throw new InvalidOperationException("Import pipeline not initialized");
-
-            var files = scrape.Files.Select(f => f.FullName).ToArray();
-            var total = files.Length;
-
-            // Import files one by one using ImportAsync
-            for (int i = 0; i < total; i++)
-            {
-                await importPipeline.ImportAsync(files[i], progress, i + 1, total);
-            }
         }
 
         private void CreateNewScrape()
@@ -338,46 +341,69 @@ namespace PrivacyLens.Menus
                 Math.Max(1, int.Parse(maxPagesInput));
 
             // Anti-detection mode
-            Console.Write("Use stealth mode for anti-bot protection? (y/N): ");
-            var stealthInput = Console.ReadLine();
-            bool antiDetection = stealthInput?.Trim().ToLower() == "y";
+            Console.Write("Use stealth mode for anti-bot protection? (Y/n): ");
+            var stealth = Console.ReadLine()?.Trim().ToLower() != "n";
 
-            Console.WriteLine("\nThis may take several minutes...\n");
+            // Confirm
+            Console.WriteLine("\n----------------------------------------");
+            Console.WriteLine("Scrape Configuration:");
+            Console.WriteLine($"  URL: {url}");
+            Console.WriteLine($"  Max pages: {maxPages}");
+            Console.WriteLine($"  Stealth mode: {(stealth ? "Enabled" : "Disabled")}");
+            Console.WriteLine("----------------------------------------");
+            Console.Write("\nStart scraping? (Y/n): ");
 
+            if (Console.ReadLine()?.Trim().ToLower() == "n")
+            {
+                Console.WriteLine("Scrape cancelled.");
+                Console.WriteLine("Press any key to continue...");
+                Console.ReadKey();
+                return;
+            }
+
+            // Execute scrape
+            Console.WriteLine("\nStarting scrape...");
             try
             {
-                // Fixed: Added all required parameters for ScrapeWebsiteAsync
+                // FIXED: Use proper method signature with ScrapeTarget enum
                 var task = scraperService.ScrapeWebsiteAsync(
                     url,
                     WebScraperService.ScrapeTarget.CorporateWebsite,
-                    antiDetection,
-                    maxPages
-                );
-                var result = task.GetAwaiter().GetResult();
+                    stealth,
+                    maxPages);
+                var scrapeResult = task.GetAwaiter().GetResult();
 
                 Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine($"\n✓ Scraping completed successfully!");
-                Console.WriteLine($"  Pages: {result.PagesScraped}");
-                Console.WriteLine($"  Documents: {result.DocumentsDownloaded}");
+                Console.WriteLine($"\n✓ Scrape completed!");
+                Console.WriteLine($"Pages scraped: {scrapeResult.PagesScraped}");
+                Console.WriteLine($"Documents downloaded: {scrapeResult.DocumentsDownloaded}");
                 Console.ResetColor();
+                Console.WriteLine($"Files saved to: {scrapeResult.EvidencePath}");
 
-                Console.Write("\nWould you like to import the scraped files now? (Y/n): ");
-                var importNow = Console.ReadLine()?.Trim().ToLower();
-
-                if (importNow != "n")
+                Console.WriteLine("\nWould you like to import the scraped data now? (Y/n): ");
+                if (Console.ReadLine()?.Trim().ToLower() != "n")
                 {
-                    // Find the most recent scrape (the one we just created)
-                    var scrapes = GetExistingScrapes();
-                    if (scrapes.Any())
+                    var scrapeInfo = new ScrapeInfo
                     {
-                        ImportExistingScrape(scrapes.First());
-                    }
+                        Path = scrapeResult.EvidencePath,
+                        Name = Path.GetFileName(scrapeResult.EvidencePath),
+                        CreatedDate = DateTime.Now,
+                        Files = Directory.EnumerateFiles(scrapeResult.EvidencePath, "*.*",
+                            new EnumerationOptions { RecurseSubdirectories = true })
+                            .Select(f => new FileInfo(f))
+                            .Where(f => IsSupportedFile(f.Extension))
+                            .ToList()
+                    };
+                    scrapeInfo.FileCount = scrapeInfo.Files.Count;
+                    scrapeInfo.TotalSizeMB = scrapeInfo.Files.Sum(f => f.Length) / (1024.0 * 1024.0);
+
+                    ImportExistingScrape(scrapeInfo);
                 }
             }
             catch (Exception ex)
             {
                 Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"\nError during scraping: {ex.Message}");
+                Console.WriteLine($"\nError during scrape: {ex.Message}");
                 Console.ResetColor();
             }
 
@@ -388,10 +414,17 @@ namespace PrivacyLens.Menus
         private void ViewScrapeDetails(List<ScrapeInfo> scrapes)
         {
             Console.Clear();
-            Console.WriteLine("========================================");
-            Console.WriteLine(" View Scrape Details");
-            Console.WriteLine("========================================");
+            Console.WriteLine("View Scrape Details");
+            Console.WriteLine("===================");
             Console.WriteLine();
+
+            if (scrapes.Count == 0)
+            {
+                Console.WriteLine("No scrapes available.");
+                Console.WriteLine("\nPress any key to continue...");
+                Console.ReadKey();
+                return;
+            }
 
             for (int i = 0; i < scrapes.Count; i++)
             {
@@ -399,43 +432,51 @@ namespace PrivacyLens.Menus
             }
 
             Console.WriteLine();
-            Console.Write("Select scrape to view (or B for back): ");
-            var input = Console.ReadLine()?.Trim().ToUpper();
+            Console.Write("Select scrape to view (1-" + scrapes.Count + "): ");
 
-            if (input == "B")
-                return;
-
-            if (int.TryParse(input, out int selection) && selection >= 1 && selection <= scrapes.Count)
+            if (int.TryParse(Console.ReadLine(), out int selection) &&
+                selection >= 1 && selection <= scrapes.Count)
             {
                 var scrape = scrapes[selection - 1];
-                Console.Clear();
-                Console.WriteLine($"Details for: {scrape.Name}");
-                Console.WriteLine("=" + new string('=', scrape.Name.Length + 13));
-                Console.WriteLine();
-                Console.WriteLine($"Created: {scrape.CreatedDate:yyyy-MM-dd HH:mm:ss}");
-                Console.WriteLine($"Path: {scrape.Path}");
-                Console.WriteLine($"Total Files: {scrape.FileCount}");
-                Console.WriteLine($"Total Size: {scrape.TotalSizeMB:F2} MB");
-                Console.WriteLine($"Status: {(scrape.IsImported ? "IMPORTED" : "NOT IMPORTED")}");
-                Console.WriteLine();
-                Console.WriteLine("Files by type:");
+                ShowScrapeDetails(scrape);
+            }
+            else
+            {
+                Console.WriteLine("Invalid selection.");
+                Console.WriteLine("\nPress any key to continue...");
+                Console.ReadKey();
+            }
+        }
 
-                var byExtension = scrape.Files.GroupBy(f => f.Extension.ToLower())
-                    .OrderByDescending(g => g.Count());
+        private void ShowScrapeDetails(ScrapeInfo scrape)
+        {
+            Console.Clear();
+            Console.WriteLine("Scrape Details");
+            Console.WriteLine("==============");
+            Console.WriteLine();
+            Console.WriteLine($"Name: {scrape.Name}");
+            Console.WriteLine($"Path: {scrape.Path}");
+            Console.WriteLine($"Created: {scrape.CreatedDate:yyyy-MM-dd HH:mm:ss}");
+            Console.WriteLine($"Imported: {(scrape.IsImported ? "Yes" : "No")}");
+            Console.WriteLine($"Total Files: {scrape.FileCount}");
+            Console.WriteLine($"Total Size: {scrape.TotalSizeMB:F2} MB");
+            Console.WriteLine();
 
-                foreach (var group in byExtension)
-                {
-                    Console.WriteLine($"  {group.Key}: {group.Count()} files");
+            Console.WriteLine("File breakdown by extension:");
+            var byExtension = scrape.Files.GroupBy(f => f.Extension.ToLower())
+                .OrderByDescending(g => g.Count());
 
-                    // Show first few files as examples
-                    foreach (var file in group.Take(3))
-                    {
-                        var relativePath = Path.GetRelativePath(scrape.Path, file.FullName);
-                        Console.WriteLine($"    - {relativePath}");
-                    }
-                    if (group.Count() > 3)
-                        Console.WriteLine($"    ... and {group.Count() - 3} more");
-                }
+            foreach (var group in byExtension)
+            {
+                var totalSize = group.Sum(f => f.Length) / (1024.0 * 1024.0);
+                Console.WriteLine($"  {group.Key}: {group.Count()} files ({totalSize:F2} MB)");
+            }
+
+            Console.WriteLine();
+            Console.WriteLine("Sample files (first 10):");
+            foreach (var file in scrape.Files.Take(10))
+            {
+                Console.WriteLine($"  • {file.Name} ({file.Length / 1024.0:F1} KB)");
             }
 
             Console.WriteLine("\nPress any key to continue...");
@@ -445,132 +486,64 @@ namespace PrivacyLens.Menus
         private void DeleteOldScrapes(List<ScrapeInfo> scrapes)
         {
             Console.Clear();
-            Console.WriteLine("========================================");
-            Console.WriteLine(" Delete Old Scrapes");
-            Console.WriteLine("========================================");
+            Console.WriteLine("Delete Old Scrapes");
+            Console.WriteLine("==================");
             Console.WriteLine();
 
-            var notImported = scrapes.Where(s => !s.IsImported).ToList();
-            var imported = scrapes.Where(s => s.IsImported).ToList();
+            var oldScrapes = scrapes.Where(s => s.CreatedDate < DateTime.Now.AddDays(-30)).ToList();
 
-            Console.WriteLine($"Total scrapes: {scrapes.Count}");
-            Console.WriteLine($"Imported: {imported.Count}");
-            Console.WriteLine($"Not imported: {notImported.Count}");
-            Console.WriteLine();
-
-            Console.WriteLine("Options:");
-            Console.WriteLine("1. Delete all imported scrapes");
-            Console.WriteLine("2. Delete all non-imported scrapes");
-            Console.WriteLine("3. Delete specific scrape");
-            Console.WriteLine("4. Delete all scrapes");
-            Console.WriteLine("B. Back");
-            Console.WriteLine();
-            Console.Write("Select option: ");
-
-            var input = Console.ReadLine()?.Trim().ToUpper();
-
-            switch (input)
+            if (oldScrapes.Count == 0)
             {
-                case "1":
-                    DeleteScrapes(imported, "imported");
-                    break;
-                case "2":
-                    DeleteScrapes(notImported, "non-imported");
-                    break;
-                case "3":
-                    DeleteSpecificScrape(scrapes);
-                    break;
-                case "4":
-                    DeleteScrapes(scrapes, "all");
-                    break;
-                case "B":
-                    return;
-            }
-        }
-
-        private void DeleteScrapes(List<ScrapeInfo> scrapesToDelete, string description)
-        {
-            if (!scrapesToDelete.Any())
-            {
-                Console.WriteLine($"\nNo {description} scrapes to delete.");
-                Console.WriteLine("Press any key to continue...");
+                Console.WriteLine("No scrapes older than 30 days found.");
+                Console.WriteLine("\nPress any key to continue...");
                 Console.ReadKey();
                 return;
             }
 
-            Console.WriteLine($"\nThis will delete {scrapesToDelete.Count} {description} scrape(s).");
-            Console.Write("Are you sure? (y/N): ");
+            Console.WriteLine($"Found {oldScrapes.Count} scrape(s) older than 30 days:");
+            Console.WriteLine();
 
-            if (Console.ReadLine()?.Trim().ToLower() != "y")
+            foreach (var scrape in oldScrapes)
+            {
+                Console.WriteLine($"  • {scrape.Name} - {scrape.CreatedDate:yyyy-MM-dd} ({scrape.TotalSizeMB:F1} MB)");
+            }
+
+            Console.WriteLine();
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine("⚠ Warning: This will permanently delete these scrapes!");
+            Console.ResetColor();
+            Console.Write("Proceed with deletion? (yes/N): ");
+
+            var confirm = Console.ReadLine()?.Trim().ToLower();
+            if (confirm != "yes")
+            {
+                Console.WriteLine("Deletion cancelled.");
+                Console.WriteLine("\nPress any key to continue...");
+                Console.ReadKey();
                 return;
+            }
 
-            foreach (var scrape in scrapesToDelete)
+            int deleted = 0;
+            foreach (var scrape in oldScrapes)
             {
                 try
                 {
-                    Directory.Delete(scrape.Path, true);
-                    Console.WriteLine($"Deleted: {scrape.Name}");
+                    Directory.Delete(scrape.Path, recursive: true);
+                    deleted++;
+                    Console.WriteLine($"  ✓ Deleted: {scrape.Name}");
                 }
                 catch (Exception ex)
                 {
                     Console.ForegroundColor = ConsoleColor.Red;
-                    Console.WriteLine($"Failed to delete {scrape.Name}: {ex.Message}");
+                    Console.WriteLine($"  ✗ Failed to delete {scrape.Name}: {ex.Message}");
                     Console.ResetColor();
                 }
             }
 
-            Console.WriteLine("\nPress any key to continue...");
-            Console.ReadKey();
-        }
-
-        private void DeleteSpecificScrape(List<ScrapeInfo> scrapes)
-        {
-            Console.Clear();
-            Console.WriteLine("Select scrape to delete:");
             Console.WriteLine();
-
-            for (int i = 0; i < scrapes.Count; i++)
-            {
-                var scrape = scrapes[i];
-                Console.Write($"{i + 1}. ");
-                if (scrape.IsImported)
-                {
-                    Console.ForegroundColor = ConsoleColor.Green;
-                    Console.Write("[IMPORTED] ");
-                    Console.ResetColor();
-                }
-                Console.WriteLine($"{scrape.Name}");
-            }
-
-            Console.WriteLine();
-            Console.Write("Select scrape number (or B for back): ");
-            var input = Console.ReadLine()?.Trim().ToUpper();
-
-            if (input == "B")
-                return;
-
-            if (int.TryParse(input, out int selection) && selection >= 1 && selection <= scrapes.Count)
-            {
-                var scrape = scrapes[selection - 1];
-                Console.Write($"\nDelete {scrape.Name}? (y/N): ");
-
-                if (Console.ReadLine()?.Trim().ToLower() == "y")
-                {
-                    try
-                    {
-                        Directory.Delete(scrape.Path, true);
-                        Console.ForegroundColor = ConsoleColor.Green;
-                        Console.WriteLine($"Deleted: {scrape.Name}");
-                        Console.ResetColor();
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.ForegroundColor = ConsoleColor.Red;
-                        Console.WriteLine($"Failed to delete: {ex.Message}");
-                        Console.ResetColor();
-                    }
-                }
-            }
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"Successfully deleted {deleted} scrape(s).");
+            Console.ResetColor();
 
             Console.WriteLine("\nPress any key to continue...");
             Console.ReadKey();
@@ -578,20 +551,28 @@ namespace PrivacyLens.Menus
 
         private bool IsSupportedFile(string extension)
         {
-            var supported = new[] { ".pdf", ".doc", ".docx", ".txt", ".rtf", ".html", ".htm", ".csv", ".xls", ".xlsx" };
-            return supported.Contains(extension.ToLower());
-        }
+            if (string.IsNullOrEmpty(extension)) return false;
 
-        // Helper class to store scrape information
-        private class ScrapeInfo
-        {
-            public string Path { get; set; } = "";
-            public string Name { get; set; } = "";
-            public DateTime CreatedDate { get; set; }
-            public int FileCount { get; set; }
-            public double TotalSizeMB { get; set; }
-            public List<FileInfo> Files { get; set; } = new();
-            public bool IsImported { get; set; }
+            // FIXED: Exclude JSON files (they're just metadata)
+            var supportedExtensions = new[] {
+                ".html", ".htm", ".pdf", ".doc", ".docx",
+                ".xls", ".xlsx", ".ppt", ".pptx",
+                ".txt", ".csv", ".rtf", ".xml"
+            };
+
+            return supportedExtensions.Contains(extension.ToLower());
         }
+    }
+
+    // Helper class for scrape information
+    public class ScrapeInfo
+    {
+        public string Path { get; set; } = string.Empty;
+        public string Name { get; set; } = string.Empty;
+        public DateTime CreatedDate { get; set; }
+        public int FileCount { get; set; }
+        public double TotalSizeMB { get; set; }
+        public List<FileInfo> Files { get; set; } = new List<FileInfo>();
+        public bool IsImported { get; set; }
     }
 }

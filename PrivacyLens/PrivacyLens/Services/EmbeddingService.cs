@@ -22,36 +22,57 @@ namespace PrivacyLens.Services
                 throw new InvalidOperationException("Missing configuration section 'AzureOpenAI'.");
 
             var emb = root.GetSection("EmbeddingsAgent");
+
+            // Get endpoint from EmbeddingsAgent first, then fall back to root
             string endpointStr =
                 emb["Endpoint"] ??
                 root["Endpoint"] ??
-                throw new InvalidOperationException("AzureOpenAI:Endpoint (or EmbeddingsAgent.Endpoint) is missing.");
+                throw new InvalidOperationException("AzureOpenAI:EmbeddingsAgent:Endpoint is missing.");
 
+            // Get API key from EmbeddingsAgent first, then fall back to root
             string apiKey =
                 emb["ApiKey"] ??
                 root["ApiKey"] ??
-                throw new InvalidOperationException("AzureOpenAI:ApiKey (or EmbeddingsAgent.ApiKey) is missing.");
+                throw new InvalidOperationException("AzureOpenAI:EmbeddingsAgent:ApiKey is missing.");
 
+            // Get deployment name from EmbeddingsAgent first, then fall back to root
             string deployment =
                 emb["EmbeddingDeployment"] ??
                 root["EmbeddingDeployment"] ??
-                throw new InvalidOperationException("AzureOpenAI:EmbeddingDeployment (or EmbeddingsAgent.EmbeddingDeployment) is missing.");
+                throw new InvalidOperationException("AzureOpenAI:EmbeddingsAgent:EmbeddingDeployment is missing.");
 
             var endpoint = new Uri(endpointStr);
             var client = new AzureOpenAIClient(endpoint, new AzureKeyCredential(apiKey));
 
             _embeddingClient = client.GetEmbeddingClient(deployment);
 
-            // Optional: let you specify dimensions in appsettings if you want (defaults are model-specific).
-            EmbeddingDimensions = int.TryParse(root["EmbeddingDimensions"], out var d) ? d : 1536;
-            Console.WriteLine($"[Embeddings] endpoint={endpoint}, deployment={deployment}");
+            // Set dimensions based on the deployment model
+            EmbeddingDimensions = deployment?.ToLower() switch
+            {
+                "text-embedding-3-large" => 3072,
+                "text-embedding-3-small" => 1536,
+                "text-embedding-ada-002" => 1536,
+                _ => int.TryParse(emb["EmbeddingDimensions"] ?? root["EmbeddingDimensions"], out var d) ? d : 1536
+            };
+
+            Console.WriteLine($"[Embeddings] endpoint={endpoint.Host}, deployment={deployment}, dimensions={EmbeddingDimensions}");
         }
 
         public async Task<float[]> EmbedAsync(string text, CancellationToken ct = default)
         {
-            var response = await _embeddingClient.GenerateEmbeddingsAsync(new[] { text }, cancellationToken: ct);
-            var mem = response.Value[0].ToFloats();
-            return mem.ToArray();
+            try
+            {
+                var response = await _embeddingClient.GenerateEmbeddingsAsync(new[] { text }, cancellationToken: ct);
+                var embedding = response.Value[0];
+
+                // Convert to float array
+                var mem = embedding.ToFloats();
+                return mem.ToArray();
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException($"Failed to generate embedding: {ex.Message}", ex);
+            }
         }
     }
 }

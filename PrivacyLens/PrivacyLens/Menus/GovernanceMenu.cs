@@ -1,9 +1,11 @@
-﻿// Menus/GovernanceMenu.cs — Streamlined with automatic import from default folder
+﻿// Menus/GovernanceMenu.cs — Fixed ALL compilation errors with minimal changes
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PrivacyLens.Models;
 using PrivacyLens.Services;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -17,11 +19,11 @@ namespace PrivacyLens.Menus
         private readonly ConfigurationService configService;
         private readonly IConfiguration config;
         private readonly string defaultSourcePath;
+        private readonly ILogger<GptChunkingService> _logger;
 
         public GovernanceMenu()
         {
             appPath = AppDomain.CurrentDomain.BaseDirectory;
-            corporateScrapingMenu = new CorporateScrapingMenu();
             configService = new ConfigurationService();
 
             // Build configuration
@@ -29,6 +31,19 @@ namespace PrivacyLens.Menus
                 .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
                 .AddEnvironmentVariables()
                 .Build();
+
+            // Create logger factory and logger
+            // Note: If AddConsole is not available, you may need to add Microsoft.Extensions.Logging.Console NuGet package
+            var loggerFactory = LoggerFactory.Create(builder =>
+            {
+                // builder.AddConsole(); // Uncomment after adding Microsoft.Extensions.Logging.Console package
+                builder.SetMinimumLevel(LogLevel.Information);
+            });
+            _logger = loggerFactory.CreateLogger<GptChunkingService>();
+
+            // Initialize CorporateScrapingMenu with required parameters
+            // Pass null for pipeline so it creates its own
+            corporateScrapingMenu = new CorporateScrapingMenu(config, _logger, null);
 
             // Get default source path from configuration
             var paths = configService.GetPaths();
@@ -97,15 +112,15 @@ namespace PrivacyLens.Menus
             Console.WriteLine("Import Documents from Default Folder");
             Console.WriteLine("=====================================");
             Console.WriteLine();
-            Console.WriteLine($"Source folder: {defaultSourcePath}");
+            Console.WriteLine($"Default folder: {defaultSourcePath}");
             Console.WriteLine();
 
-            // Check if folder exists and has files
+            // Check if folder exists
             if (!Directory.Exists(defaultSourcePath))
             {
                 Console.WriteLine("Default folder does not exist. Creating it now...");
                 Directory.CreateDirectory(defaultSourcePath);
-                Console.WriteLine($"\nPlease place documents in: {defaultSourcePath}");
+                Console.WriteLine("Folder created. Please add documents and try again.");
                 Console.WriteLine("\nPress any key to continue...");
                 Console.ReadKey();
                 return;
@@ -117,38 +132,31 @@ namespace PrivacyLens.Menus
                 .Where(f => supportedExtensions.Contains(Path.GetExtension(f).ToLower()))
                 .ToList();
 
-            Console.WriteLine($"Found {files.Count} supported document(s):");
-            if (files.Count > 0)
+            Console.WriteLine($"Found {files.Count} supported document(s).");
+            if (files.Count == 0)
             {
-                // Show first few files
-                var displayCount = Math.Min(5, files.Count);
-                for (int i = 0; i < displayCount; i++)
-                {
-                    Console.WriteLine($"  • {Path.GetFileName(files[i])}");
-                }
-                if (files.Count > displayCount)
-                {
-                    Console.WriteLine($"  ... and {files.Count - displayCount} more");
-                }
-            }
-            else
-            {
-                Console.WriteLine("\nNo documents found in the default folder.");
-                Console.WriteLine($"Please place documents in: {defaultSourcePath}");
-                Console.WriteLine("\nSupported file types: " + string.Join(", ", supportedExtensions));
+                Console.WriteLine("\nNo supported documents found in the default folder.");
+                Console.WriteLine("Supported types: " + string.Join(", ", supportedExtensions));
                 Console.WriteLine("\nPress any key to continue...");
                 Console.ReadKey();
                 return;
             }
 
-            // Confirm import
-            Console.WriteLine();
-            Console.Write("Import these documents? (Y/n): ");
-            var confirm = Console.ReadLine();
-            if (confirm?.Trim().ToLower() == "n")
+            // Show files to be imported
+            Console.WriteLine("\nFiles to import:");
+            foreach (var file in files.Take(10))
             {
-                return;
+                var size = new FileInfo(file).Length;
+                Console.WriteLine($"  • {Path.GetFileName(file)} ({size / 1024.0:F1} KB)");
             }
+            if (files.Count > 10)
+                Console.WriteLine($"  ... and {files.Count - 10} more files");
+
+            Console.WriteLine();
+            Console.Write("Proceed with import? (Y/n): ");
+            var response = Console.ReadLine()?.Trim().ToLower();
+            if (response == "n")
+                return;
 
             // Import the documents
             Console.WriteLine("\nStarting import...");
@@ -161,12 +169,21 @@ namespace PrivacyLens.Menus
             Console.WriteLine("Import Documents from Custom Folder");
             Console.WriteLine("====================================");
             Console.WriteLine();
-            Console.Write("Enter the folder path containing documents: ");
+            Console.Write("Enter folder path: ");
             var folderPath = Console.ReadLine();
 
-            if (string.IsNullOrWhiteSpace(folderPath) || !Directory.Exists(folderPath))
+            if (string.IsNullOrWhiteSpace(folderPath))
             {
-                Console.WriteLine("\nError: Invalid folder path.");
+                Console.WriteLine("\nNo path provided.");
+                Console.WriteLine("Press any key to continue...");
+                Console.ReadKey();
+                return;
+            }
+
+            // Check if folder exists
+            if (!Directory.Exists(folderPath))
+            {
+                Console.WriteLine($"\nFolder does not exist: {folderPath}");
                 Console.WriteLine("Press any key to continue...");
                 Console.ReadKey();
                 return;
@@ -195,8 +212,8 @@ namespace PrivacyLens.Menus
         {
             try
             {
-                // Initialize services for import
-                var chunker = new GptChunkingService(config);
+                // Initialize services for import - FIXED: Add logger parameter to GptChunkingService
+                var chunker = new GptChunkingService(config, _logger);
                 var embed = new EmbeddingService(config);
                 var store = new VectorStore(config);
                 var pipeline = new GovernanceImportPipeline(chunker, embed, store, config);
@@ -229,29 +246,32 @@ namespace PrivacyLens.Menus
                         await pipeline.ImportAsync(file, progress, i + 1, files.Count);
 
                         Console.ForegroundColor = ConsoleColor.Green;
-                        Console.WriteLine($"  ✅ Successfully imported");
+                        Console.WriteLine($"  ✓ Successfully imported");
                         Console.ResetColor();
                         imported++;
                     }
                     catch (Exception ex)
                     {
                         Console.ForegroundColor = ConsoleColor.Red;
-                        Console.WriteLine($"  ❌ Failed: {ex.Message}");
+                        Console.WriteLine($"  ✗ Failed: {ex.Message}");
                         Console.ResetColor();
                         failed++;
                     }
+
+                    Console.WriteLine();
                 }
 
-                // Show summary
-                Console.WriteLine("\n========================================");
-                Console.WriteLine(" Import Summary");
+                // Summary
                 Console.WriteLine("========================================");
-                Console.WriteLine($" Total files: {files.Count}");
-                Console.WriteLine($" ✅ Succeeded: {imported}");
+                Console.WriteLine(" Import Complete");
+                Console.WriteLine("========================================");
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine($"  ✓ Successfully imported: {imported}");
+                Console.ResetColor();
                 if (failed > 0)
                 {
                     Console.ForegroundColor = ConsoleColor.Red;
-                    Console.WriteLine($" ❌ Failed: {failed}");
+                    Console.WriteLine($"  ✗ Failed: {failed}");
                     Console.ResetColor();
                 }
                 Console.WriteLine("========================================");
@@ -262,7 +282,7 @@ namespace PrivacyLens.Menus
             catch (Exception ex)
             {
                 Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"\n❌ Import process failed: {ex.Message}");
+                Console.WriteLine($"\n✗ Import process failed: {ex.Message}");
                 Console.ResetColor();
             }
 
@@ -317,12 +337,12 @@ namespace PrivacyLens.Menus
             await using var conn = await store.CreateConnectionAsync();
 
             // Get chunk count
-            var chunkCountCmd = new Npgsql.NpgsqlCommand(
+            var chunkCountCmd = new NpgsqlCommand(
                 "SELECT COUNT(*) FROM chunks WHERE app_id IS NULL", conn);
             var totalChunks = Convert.ToInt32(await chunkCountCmd.ExecuteScalarAsync() ?? 0);
 
             // Get document count
-            var docCountCmd = new Npgsql.NpgsqlCommand(
+            var docCountCmd = new NpgsqlCommand(
                 "SELECT COUNT(DISTINCT document_path) FROM chunks WHERE app_id IS NULL", conn);
             var totalDocuments = Convert.ToInt32(await docCountCmd.ExecuteScalarAsync() ?? 0);
 
@@ -398,7 +418,7 @@ namespace PrivacyLens.Menus
 
         private async Task<List<SearchResult>> SearchDocumentsAsync(string query, EmbeddingService embed, VectorStore store)
         {
-            // Generate embedding for query
+            // Generate embedding for query - FIXED: Pass string, not float[]
             var queryEmbedding = await embed.EmbedAsync(query);
 
             // Search for similar chunks (governance only - app_id is NULL)
