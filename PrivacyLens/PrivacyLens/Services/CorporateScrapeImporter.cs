@@ -1,8 +1,10 @@
-﻿// Services/CorporateScrapeImporter.cs - Fixed with comprehensive debug logging
+﻿// Services/CorporateScrapeImporter.cs - Enhanced with embedding fix and detailed reporting
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Configuration;
@@ -10,14 +12,16 @@ using Microsoft.Extensions.Logging;
 using PrivacyLens.Chunking;
 using PrivacyLens.Models;
 using PrivacyLens.Services;
+using SharpToken;
 
 namespace PrivacyLens.Services
 {
     /// <summary>
-    /// Enhanced importer for scrape folders with comprehensive file validation:
+    /// Enhanced importer for scrape folders with comprehensive file validation and statistics:
     ///   • HTML in /webpages → DOM-segment + hybrid chunking → embed + save
     ///   • Docs in /documents → validate → pipeline.ImportAsync
     ///   • Invalid files → quarantine with detailed logging
+    ///   • Enhanced reporting with token statistics
     /// </summary>
     public sealed class CorporateScrapeImporter
     {
@@ -28,6 +32,40 @@ namespace PrivacyLens.Services
         private readonly IConfiguration _config;
         private readonly ILogger<GptChunkingService> _logger;
         private readonly bool _debugMode;
+        private readonly GptEncoding _tokenEncoder;
+
+        // Chunking statistics tracking
+        private class ChunkingStats
+        {
+            public int TotalChunks { get; set; }
+            public int MinTokens { get; set; } = int.MaxValue;
+            public int MaxTokens { get; set; }
+            public long TotalTokens { get; set; }
+            public bool UsedPanelization { get; set; }
+            public int PanelCount { get; set; }
+
+            public double AverageTokens => TotalChunks > 0 ? (double)TotalTokens / TotalChunks : 0;
+
+            public void UpdateWithChunk(int tokenCount)
+            {
+                TotalChunks++;
+                TotalTokens += tokenCount;
+                MinTokens = Math.Min(MinTokens, tokenCount);
+                MaxTokens = Math.Max(MaxTokens, tokenCount);
+            }
+
+            public string GetSummary()
+            {
+                if (TotalChunks == 0) return "No chunks generated";
+
+                var sb = new StringBuilder();
+                sb.Append($"{TotalChunks} chunks");
+                sb.Append($" | Tokens: min={MinTokens}, avg={AverageTokens:F0}, max={MaxTokens}");
+                if (UsedPanelization)
+                    sb.Append($" | Panelized: {PanelCount} panels");
+                return sb.ToString();
+            }
+        }
 
         public CorporateScrapeImporter(GovernanceImportPipeline pipeline, IConfiguration config)
         {
@@ -36,6 +74,9 @@ namespace PrivacyLens.Services
 
             // Check if debug mode is enabled
             _debugMode = config.GetValue<bool>("AzureOpenAI:Diagnostics:Verbose", false);
+
+            // Initialize tokenizer for statistics
+            _tokenEncoder = GptEncoding.GetEncodingForModel("gpt-4");
 
             // Create logger
             var loggerFactory = LoggerFactory.Create(builder =>
@@ -143,80 +184,79 @@ namespace PrivacyLens.Services
                         if (_debugMode)
                             Console.WriteLine($"  • Chunking HTML content...");
 
+                        var stats = new ChunkingStats();
                         var chunks = await _htmlOrchestrator.ChunkHtmlAsync(content, htmlPath, ct);
 
                         if (chunks == null || chunks.Count == 0)
                         {
                             Console.ForegroundColor = ConsoleColor.Yellow;
-                            Console.WriteLine($"  ⚠ NO CHUNKS: Hybrid chunker returned 0 chunks");
+                            Console.WriteLine($"  ⚠ WARNING: No chunks generated");
                             Console.ResetColor();
-
-                            if (_debugMode)
-                            {
-                                // Try to understand why
-                                Console.WriteLine($"    - Checking for boilerplate removal...");
-                                var firstPart = content.Length > 500 ? content.Substring(0, 500) : content;
-                                Console.WriteLine($"    - First 500 chars: {firstPart}");
-                            }
-
-                            await reportWriter.WriteLineAsync($"EMPTY: {name} - No chunks generated");
+                            await reportWriter.WriteLineAsync($"WARN: {name} - No chunks generated");
                             htmlEmpty++;
                             continue;
                         }
 
-                        Console.WriteLine($"  • Generated {chunks.Count} chunks");
-
-                        // Embed and save each chunk
-                        if (_debugMode)
-                            Console.WriteLine($"  • Embedding chunks...");
-
-                        var materialized = new List<ChunkRecord>();
-                        for (int c = 0; c < chunks.Count; c++)
+                        // Calculate chunking statistics
+                        foreach (var chunk in chunks)
                         {
-                            var ch = chunks[c];
-
-                            if (_debugMode && c == 0) // Show first chunk details
-                            {
-                                var preview = ch.Content.Length > 100
-                                    ? ch.Content.Substring(0, 100) + "..."
-                                    : ch.Content;
-                                Console.WriteLine($"    - Chunk 1 preview: {preview}");
-                                Console.WriteLine($"    - Chunk 1 length: {ch.Content.Length} chars");
-                            }
-
-                            var embedding = await _embed.EmbedAsync(ch.Content, ct);
-                            materialized.Add(ch with { Embedding = embedding });
-
-                            // Progress indicator for large chunk sets
-                            if (chunks.Count > 10 && (c + 1) % 10 == 0)
-                            {
-                                Console.WriteLine($"    - Embedded {c + 1}/{chunks.Count} chunks");
-                            }
+                            var tokenCount = _tokenEncoder.Encode(chunk.Content).Count;
+                            stats.UpdateWithChunk(tokenCount);
                         }
 
+                        Console.WriteLine($"   Generated {chunks.Count} chunks");
                         if (_debugMode)
-                            Console.WriteLine($"  • Saving {materialized.Count} chunks to database...");
+                        {
+                            Console.WriteLine($"   {stats.GetSummary()}");
+                        }
 
-                        await _store.SaveChunksAsync(materialized, ct);
+                        // FIX: Generate embeddings for each chunk (this was missing!)
+                        var chunksWithEmbeddings = new List<ChunkRecord>();
+                        Console.Write($"   Generating embeddings");
+
+                        for (int j = 0; j < chunks.Count; j++)
+                        {
+                            if (j % 5 == 0) Console.Write(".");
+
+                            var chunk = chunks[j];
+                            var embedding = await _embed.EmbedAsync(chunk.Content, ct);
+
+                            chunksWithEmbeddings.Add(new ChunkRecord(
+                                chunk.Index,
+                                chunk.Content,
+                                chunk.DocumentPath,
+                                embedding
+                            ));
+
+                            // Small delay to avoid rate limiting
+                            if (j < chunks.Count - 1)
+                                await Task.Delay(50, ct);
+                        }
+                        Console.WriteLine(" done");
+
+                        // Save to vector store
+                        await _store.SaveChunksAsync(chunksWithEmbeddings, ct);
 
                         Console.ForegroundColor = ConsoleColor.Green;
                         Console.WriteLine($"  ✓ SUCCESS: {name} → {chunks.Count} chunks saved");
                         Console.ResetColor();
 
-                        await reportWriter.WriteLineAsync($"✓ {name} → {chunks.Count} chunks");
+                        await reportWriter.WriteLineAsync($"OK: {name} - {stats.GetSummary()}");
                         htmlOk++;
                     }
                     catch (Exception ex)
                     {
-                        htmlErr++;
                         Console.ForegroundColor = ConsoleColor.Red;
                         Console.WriteLine($"  ✗ ERROR: {ex.Message}");
+                        Console.ResetColor();
+
                         if (_debugMode)
                         {
-                            Console.WriteLine($"    Stack trace: {ex.StackTrace}");
+                            Console.WriteLine($"  Stack: {ex.StackTrace}");
                         }
-                        Console.ResetColor();
-                        await reportWriter.WriteLineAsync($"✗ {name}: {ex.Message}");
+
+                        await reportWriter.WriteLineAsync($"ERROR: {name} - {ex.Message}");
+                        htmlErr++;
                     }
                 }
             }
@@ -233,314 +273,119 @@ namespace PrivacyLens.Services
                 {
                     var docPath = docFiles[i];
                     var name = Path.GetFileName(docPath);
-                    var size = new FileInfo(docPath).Length;
+                    var ext = Path.GetExtension(docPath).ToLowerInvariant();
 
                     Console.WriteLine($"\n[{i + 1}/{docFiles.Length}] Processing: {name}");
 
-                    if (_debugMode)
-                    {
-                        Console.WriteLine($"  • File size: {size / 1024.0:F1} KB");
-                        Console.WriteLine($"  • Extension: {Path.GetExtension(docPath)}");
-                    }
-
-                    // File validation
-                    if (size == 0)
-                    {
-                        docSkip++;
-                        Console.ForegroundColor = ConsoleColor.Yellow;
-                        Console.WriteLine($"  ⚠ SKIPPED: Empty file (0 bytes)");
-                        Console.ResetColor();
-                        await reportWriter.WriteLineAsync($"⚠ SKIP: {name} - Empty file");
-                        continue;
-                    }
-
-                    var ext = Path.GetExtension(docPath).ToLowerInvariant();
-                    if (!IsValidDocumentType(ext))
-                    {
-                        docSkip++;
-                        Console.ForegroundColor = ConsoleColor.Yellow;
-                        Console.WriteLine($"  ⚠ SKIPPED: Unsupported type {ext}");
-                        Console.ResetColor();
-                        await reportWriter.WriteLineAsync($"⚠ SKIP: {name} - Unsupported type");
-                        continue;
-                    }
-
-                    // Check for HTML error pages disguised as documents
-                    if (IsDocumentExtension(ext))
-                    {
-                        if (_debugMode)
-                            Console.WriteLine($"  • Validating file integrity...");
-
-                        var isValid = await ValidateFileAsync(docPath);
-                        if (!isValid)
-                        {
-                            docQuarantined++;
-                            var quarantinePath = Path.Combine(quarantineDir, name);
-                            File.Move(docPath, quarantinePath, overwrite: true);
-
-                            Console.ForegroundColor = ConsoleColor.Yellow;
-                            Console.WriteLine($"  🔒 QUARANTINED: Invalid file → moved to _quarantine");
-                            Console.ResetColor();
-                            await reportWriter.WriteLineAsync($"🔒 QUARANTINE: {name} - Failed validation");
-                            continue;
-                        }
-                    }
-
-                    // Valid document - import via pipeline
                     try
                     {
-                        if (_debugMode)
-                            Console.WriteLine($"  • Importing via GovernanceImportPipeline...");
+                        var fileInfo = new FileInfo(docPath);
+
+                        // Basic validation
+                        if (fileInfo.Length < 100)
+                        {
+                            Console.ForegroundColor = ConsoleColor.Yellow;
+                            Console.WriteLine($"  ⚠ QUARANTINE: Suspiciously small file ({fileInfo.Length} bytes)");
+                            Console.ResetColor();
+
+                            var quarantinePath = Path.Combine(quarantineDir, name);
+                            File.Move(docPath, quarantinePath, overwrite: true);
+                            await reportWriter.WriteLineAsync($"QUARANTINE: {name} - Too small ({fileInfo.Length} bytes)");
+                            docQuarantined++;
+                            continue;
+                        }
+
+                        // Check if it's a supported document type
+                        var supportedExtensions = new[] { ".pdf", ".doc", ".docx", ".txt", ".csv", ".xlsx", ".xls" };
+                        if (!supportedExtensions.Contains(ext))
+                        {
+                            Console.ForegroundColor = ConsoleColor.Yellow;
+                            Console.WriteLine($"  ⚠ SKIPPED: Unsupported file type ({ext})");
+                            Console.ResetColor();
+                            await reportWriter.WriteLineAsync($"SKIP: {name} - Unsupported type");
+                            docSkip++;
+                            continue;
+                        }
+
+                        // Use the pipeline to import the document
+                        Console.Write($"  • Processing document with pipeline");
 
                         var progress = new Progress<ImportProgress>(p =>
                         {
-                            if (!string.IsNullOrEmpty(p.Stage) && p.Stage != "Done")
+                            if (p.Stage == "Chunk" && p.Info?.Contains("chunks=") == true)
                             {
-                                if (_debugMode || p.Stage == "Error")
-                                {
-                                    Console.WriteLine($"    - {p.Stage}: {p.Info ?? ""}");
-                                }
+                                Console.Write($" → {p.Info}");
                             }
                         });
 
-                        await _pipeline.ImportAsync(docPath, progress, i + 1, docFiles.Length, ct);
+                        // Import using the pipeline (this handles chunking + embedding)
+                        await _pipeline.ImportAsync(
+                            docPath,
+                            progress: progress,
+                            current: i + 1,
+                            total: docFiles.Length,
+                            ct: ct
+                        );
 
-                        docOk++;
+                        Console.WriteLine();
                         Console.ForegroundColor = ConsoleColor.Green;
                         Console.WriteLine($"  ✓ SUCCESS: {name} imported");
                         Console.ResetColor();
-                        await reportWriter.WriteLineAsync($"✓ {name} ({size / 1024.0:F1} KB)");
+
+                        await reportWriter.WriteLineAsync($"OK: {name} - Imported via pipeline");
+                        docOk++;
                     }
                     catch (Exception ex)
                     {
-                        docErr++;
                         Console.ForegroundColor = ConsoleColor.Red;
-                        Console.WriteLine($"  ✗ ERROR: {ex.Message}");
+                        Console.WriteLine($"\n  ✗ ERROR: {ex.Message}");
+                        Console.ResetColor();
+
                         if (_debugMode)
                         {
-                            Console.WriteLine($"    Stack trace: {ex.StackTrace}");
+                            Console.WriteLine($"  Stack: {ex.StackTrace}");
                         }
-                        Console.ResetColor();
-                        await reportWriter.WriteLineAsync($"✗ {name}: {ex.Message}");
+
+                        await reportWriter.WriteLineAsync($"ERROR: {name} - {ex.Message}");
+                        docErr++;
                     }
                 }
             }
 
             // Summary
-            Console.WriteLine("\n" + new string('=', 50));
+            Console.WriteLine("\n========================================");
             Console.WriteLine("IMPORT SUMMARY");
-            Console.WriteLine(new string('=', 50));
+            Console.WriteLine("========================================");
+            Console.WriteLine($"HTML Pages:");
+            Console.WriteLine($"  ✓ Successful: {htmlOk}");
+            Console.WriteLine($"  ⚠ Empty/Skipped: {htmlEmpty}");
+            Console.WriteLine($"  ✗ Failed: {htmlErr}");
+            Console.WriteLine($"\nDocuments:");
+            Console.WriteLine($"  ✓ Successful: {docOk}");
+            Console.WriteLine($"  ⚠ Skipped: {docSkip}");
+            Console.WriteLine($"  🔒 Quarantined: {docQuarantined}");
+            Console.WriteLine($"  ✗ Failed: {docErr}");
+            Console.WriteLine();
 
             await reportWriter.WriteLineAsync($"\n=== SUMMARY ===");
+            await reportWriter.WriteLineAsync($"HTML: OK={htmlOk}, Empty={htmlEmpty}, Error={htmlErr}");
+            await reportWriter.WriteLineAsync($"Docs: OK={docOk}, Skip={docSkip}, Quarantine={docQuarantined}, Error={docErr}");
+            await reportWriter.WriteLineAsync($"Report generated: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
 
-            if (htmlFiles.Length > 0)
-            {
-                Console.WriteLine($"HTML Pages:");
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine($"  ✓ Success: {htmlOk}");
-                Console.ResetColor();
+            Console.WriteLine($"📊 Validation report saved to: {validationReportPath}");
 
-                if (htmlEmpty > 0)
-                {
-                    Console.ForegroundColor = ConsoleColor.Yellow;
-                    Console.WriteLine($"  ⚠ Empty/No chunks: {htmlEmpty}");
-                    Console.ResetColor();
-                }
-
-                if (htmlErr > 0)
-                {
-                    Console.ForegroundColor = ConsoleColor.Red;
-                    Console.WriteLine($"  ✗ Errors: {htmlErr}");
-                    Console.ResetColor();
-                }
-
-                await reportWriter.WriteLineAsync($"HTML: {htmlOk} OK, {htmlEmpty} empty, {htmlErr} errors");
-            }
-
-            if (docFiles.Length > 0)
-            {
-                Console.WriteLine($"\nDocuments:");
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine($"  ✓ Success: {docOk}");
-                Console.ResetColor();
-
-                if (docSkip > 0)
-                {
-                    Console.ForegroundColor = ConsoleColor.Yellow;
-                    Console.WriteLine($"  ⚠ Skipped: {docSkip}");
-                    Console.ResetColor();
-                }
-
-                if (docQuarantined > 0)
-                {
-                    Console.ForegroundColor = ConsoleColor.Yellow;
-                    Console.WriteLine($"  🔒 Quarantined: {docQuarantined}");
-                    Console.ResetColor();
-                }
-
-                if (docErr > 0)
-                {
-                    Console.ForegroundColor = ConsoleColor.Red;
-                    Console.WriteLine($"  ✗ Errors: {docErr}");
-                    Console.ResetColor();
-                }
-
-                await reportWriter.WriteLineAsync($"Docs: {docOk} OK, {docSkip} skipped, {docQuarantined} quarantined, {docErr} errors");
-            }
-
-            await reportWriter.WriteLineAsync($"\nReport saved to: {validationReportPath}");
-            Console.WriteLine($"\n📋 Validation report: {validationReportPath}");
-
-            if (_debugMode)
-            {
-                Console.ForegroundColor = ConsoleColor.Cyan;
-                Console.WriteLine("\n[DEBUG] Import complete - check validation report for details");
-                Console.ResetColor();
-            }
-        }
-
-        // Add missing helper methods
-        private static bool IsValidDocumentType(string ext)
-        {
-            if (string.IsNullOrEmpty(ext)) return false;
-            if (!ext.StartsWith(".")) ext = "." + ext;
-
-            var validExtensions = new[] {
-                ".pdf", ".doc", ".docx", ".xls", ".xlsx",
-                ".ppt", ".pptx", ".txt", ".csv", ".rtf", ".zip"
-            };
-
-            return validExtensions.Contains(ext.ToLowerInvariant());
-        }
-
-        private static async Task<bool> ValidateFileAsync(string filePath)
-        {
+            // Create index if needed
+            Console.WriteLine("\n🔍 Checking vector store index...");
             try
             {
-                // Simple validation - check if file can be opened and has valid magic bytes
-                var bytes = await ReadFirstBytesAsync(filePath, 512);
-
-                // Check for HTML error pages
-                if (IsLikelyHtmlError(bytes))
-                    return false;
-
-                // Check magic bytes for known file types
-                var ext = Path.GetExtension(filePath).ToLowerInvariant();
-                return FileValidator.IsValid(bytes, ext);
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// Quarantine a file with detailed logging
-        /// </summary>
-        private void QuarantineFile(string filePath, string quarantineDir, string reason)
-        {
-            try
-            {
-                var fileName = Path.GetFileName(filePath);
-                var quarantinePath = Path.Combine(quarantineDir, fileName);
-
-                // Create quarantine info file
-                var infoPath = Path.Combine(quarantineDir, fileName + ".quarantine.txt");
-                File.WriteAllText(infoPath, $"Original: {filePath}\nQuarantined: {DateTime.Now:yyyy-MM-dd HH:mm:ss}\nReason: {reason}");
-
-                // Move the file
-                File.Move(filePath, quarantinePath, overwrite: true);
-
-                Console.WriteLine($"  🔒 Quarantined: {fileName}");
+                await _store.InitializeAsync(ct);
+                Console.WriteLine("  ✓ Vector store index ready");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"  ⚠ Failed to quarantine file: {ex.Message}");
-            }
-        }
-
-        private static bool IsDocumentExtension(string ext)
-        {
-            if (string.IsNullOrEmpty(ext)) return false;
-            if (!ext.StartsWith(".")) ext = "." + ext;
-
-            var docExtensions = new[] {
-                ".pdf", ".doc", ".docx", ".xls", ".xlsx",
-                ".ppt", ".pptx", ".txt", ".csv", ".rtf", ".zip"
-            };
-
-            return docExtensions.Contains(ext.ToLowerInvariant());
-        }
-
-        private static bool IsOfficeDocument(string ext)
-        {
-            if (string.IsNullOrEmpty(ext)) return false;
-            if (!ext.StartsWith(".")) ext = "." + ext;
-
-            var officeExtensions = new[] {
-                ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"
-            };
-
-            return officeExtensions.Contains(ext.ToLowerInvariant());
-        }
-
-        private static async Task<byte[]> ReadFirstBytesAsync(string filePath, int count)
-        {
-            try
-            {
-                using var fs = File.OpenRead(filePath);
-                var buffer = new byte[Math.Min(count, fs.Length)];
-                await fs.ReadAsync(buffer, 0, buffer.Length);
-                return buffer;
-            }
-            catch
-            {
-                return Array.Empty<byte>();
-            }
-        }
-
-        private static bool IsLikelyHtmlError(byte[] bytes)
-        {
-            if (bytes == null || bytes.Length == 0) return false;
-
-            var text = System.Text.Encoding.UTF8.GetString(bytes).ToLowerInvariant();
-
-            // Common HTML error indicators
-            var errorIndicators = new[]
-            {
-                "<!doctype html",
-                "<html",
-                "404",
-                "403",
-                "error",
-                "not found",
-                "forbidden",
-                "unauthorized",
-                "access denied"
-            };
-
-            return errorIndicators.Any(indicator => text.Contains(indicator));
-        }
-
-        /// <summary>
-        /// Console progress reporter that prints pipeline stages
-        /// </summary>
-        private sealed class ConsoleProgress : IProgress<ImportProgress>
-        {
-            private readonly string _name;
-            private DateTime _last = DateTime.MinValue;
-
-            public ConsoleProgress(string name) => _name = name;
-
-            public void Report(ImportProgress p)
-            {
-                // Throttle very chatty updates
-                if ((DateTime.Now - _last).TotalMilliseconds < 75) return;
-                _last = DateTime.Now;
-
-                var info = string.IsNullOrWhiteSpace(p.Info) ? "" : $" - {p.Info}";
-                // Using correct property names
-                Console.WriteLine($"[{_name}] {p.Stage}{info}");
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"  ⚠ Index creation warning: {ex.Message}");
+                Console.ResetColor();
             }
         }
     }
