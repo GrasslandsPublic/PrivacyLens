@@ -1,4 +1,4 @@
-﻿// Program.cs
+﻿// Program.cs - Fixed version with no unreachable code warnings
 using System;
 using System.Collections.Generic;
 using Microsoft.Extensions.Configuration;
@@ -19,10 +19,11 @@ namespace PrivacyLens
     internal class Program
     {
         // ---- Behavior toggles (adjust to your preference) ----
-        private const bool FailIfDbUnavailable = true;
-        private const bool FailIfChunkingAgentUnavailable = true;
-        private const bool FailIfEmbeddingsUnavailable = true;
-        private const bool CheckDefaultQaAgent = false; // enable if you also want to verify GPT-5 on startup
+        // Changed from const to static readonly to avoid unreachable code warnings
+        private static readonly bool FailIfDbUnavailable = true;
+        private static readonly bool FailIfChunkingAgentUnavailable = true;
+        private static readonly bool FailIfEmbeddingsUnavailable = true;
+        private static readonly bool CheckDefaultQaAgent = false; // enable if you also want to verify GPT-5 on startup
 
         static void Main(string[] args)
         {
@@ -63,19 +64,31 @@ namespace PrivacyLens
                 else
                 {
                     Error("[Startup] Database connection FAILED. Check ConnectionStrings and server status.");
-                    if (FailIfDbUnavailable) return false;
-                    allChecksPass = false;
+                    if (FailIfDbUnavailable)
+                    {
+                        return false;
+                    }
+                    else
+                    {
+                        allChecksPass = false;
+                    }
                 }
             }
             catch (Exception ex)
             {
                 Error("[Startup] Database connectivity check threw an exception:");
                 Console.WriteLine(ex.Message);
-                if (FailIfDbUnavailable) return false;
-                allChecksPass = false;
+                if (FailIfDbUnavailable)
+                {
+                    return false;
+                }
+                else
+                {
+                    allChecksPass = false;
+                }
             }
 
-            // ---- Azure OpenAI: ChunkingAgent (GPT-4.1-mini) ----
+            // ---- Azure OpenAI: ChunkingAgent (GPT-4o-mini) ----
             if (!FailIfDbUnavailable || allChecksPass) // Only check if we're continuing
             {
                 try
@@ -94,14 +107,26 @@ namespace PrivacyLens
                 {
                     Error($"[Startup] ChunkingAgent check FAILED (HTTP {cre.Status}).");
                     ShowAzureErrorHints(cre.Status, GetChunkingAgentConfig(config).endpoint, GetChunkingAgentConfig(config).depName);
-                    if (FailIfChunkingAgentUnavailable) return false;
-                    allChecksPass = false;
+                    if (FailIfChunkingAgentUnavailable)
+                    {
+                        return false;
+                    }
+                    else
+                    {
+                        allChecksPass = false;
+                    }
                 }
                 catch (Exception ex)
                 {
                     Error($"[Startup] ChunkingAgent check threw: {ex.Message}");
-                    if (FailIfChunkingAgentUnavailable) return false;
-                    allChecksPass = false;
+                    if (FailIfChunkingAgentUnavailable)
+                    {
+                        return false;
+                    }
+                    else
+                    {
+                        allChecksPass = false;
+                    }
                 }
             }
 
@@ -125,129 +150,171 @@ namespace PrivacyLens
                 {
                     Error($"[Startup] Embeddings check FAILED (HTTP {cre.Status}).");
                     ShowAzureErrorHints(cre.Status, GetEmbeddingsConfig(config).endpoint, GetEmbeddingsConfig(config).depName);
-                    if (FailIfEmbeddingsUnavailable) return false;
-                    allChecksPass = false;
+                    if (FailIfEmbeddingsUnavailable)
+                    {
+                        return false;
+                    }
+                    else
+                    {
+                        allChecksPass = false;
+                    }
                 }
                 catch (Exception ex)
                 {
                     Error($"[Startup] Embeddings check threw: {ex.Message}");
-                    if (FailIfEmbeddingsUnavailable) return false;
-                    allChecksPass = false;
+                    if (FailIfEmbeddingsUnavailable)
+                    {
+                        return false;
+                    }
+                    else
+                    {
+                        allChecksPass = false;
+                    }
                 }
             }
 
-            // ---- Optional: Default QA Agent (GPT-5) ----
+            // ---- Optional: DefaultQaAgent (GPT-4o) ----
             if (CheckDefaultQaAgent && allChecksPass)
             {
                 try
                 {
                     var (endpoint, depName) = GetDefaultQaAgentConfig(config);
-                    Info($"[Startup] Checking Default QA Agent... endpoint={endpoint}, deployment={depName}");
+                    Info($"[Startup] Checking DefaultQaAgent... endpoint={endpoint}, deployment={depName}");
 
-                    var apiKey = GetDefaultQaApiKey(config);
+                    var apiKey = GetDefaultQaAgentApiKey(config);
                     var azClient = new AzureOpenAIClient(new Uri(endpoint), new AzureKeyCredential(apiKey));
                     var chat = azClient.GetChatClient(depName);
 
                     var resp = chat.CompleteChat("hi");
-                    Success($"[Startup] Default QA Agent OK. Model={resp.Value.Model}");
-                }
-                catch (ClientResultException cre) when (cre.Status == 404 || cre.Status == 401)
-                {
-                    Warning($"[Startup] Default QA Agent check FAILED (HTTP {cre.Status}).");
-                    ShowAzureErrorHints(cre.Status, GetDefaultQaAgentConfig(config).endpoint, GetDefaultQaAgentConfig(config).depName);
+                    Success($"[Startup] DefaultQaAgent OK. Model={resp.Value.Model}");
                 }
                 catch (Exception ex)
                 {
-                    Warning($"[Startup] Default QA Agent check threw: {ex.Message}");
+                    Warning($"[Startup] DefaultQaAgent check failed: {ex.Message}");
+                    // Not failing the startup for QA agent
                 }
             }
 
             return allChecksPass;
         }
 
-        // ---------- Config extraction helpers ----------
-
+        // ---- Config extractors ----
         private static (string endpoint, string depName) GetChunkingAgentConfig(IConfiguration config)
         {
-            var root = config.GetSection("AzureOpenAI:ChunkingAgent");
-            var endpoint = root["Endpoint"] ?? config["AzureOpenAI:Endpoint"] ?? "";
-            var depName = root["ChatDeployment"] ?? "gpt-4o-mini";
+            var aoai = config.GetSection("AzureOpenAI");
+            var chunkingAgent = aoai.GetSection("ChunkingAgent");
+
+            var endpoint = chunkingAgent["Endpoint"] ?? aoai["Endpoint"] ?? "";
+            var depName = chunkingAgent["ChatDeployment"] ?? "gpt-4o-mini";
+
             return (endpoint, depName);
         }
 
         private static string GetChunkingAgentApiKey(IConfiguration config)
         {
-            var root = config.GetSection("AzureOpenAI:ChunkingAgent");
-            return root["ApiKey"] ?? config["AzureOpenAI:ApiKey"] ?? "";
+            var aoai = config.GetSection("AzureOpenAI");
+            var chunkingAgent = aoai.GetSection("ChunkingAgent");
+            return chunkingAgent["ApiKey"] ?? aoai["ApiKey"] ?? "";
         }
 
         private static (string endpoint, string depName) GetEmbeddingsConfig(IConfiguration config)
         {
-            var root = config.GetSection("AzureOpenAI:EmbeddingsAgent");
-            var endpoint = root["Endpoint"] ?? config["AzureOpenAI:Endpoint"] ?? "";
-            var depName = root["EmbeddingDeployment"] ?? config["AzureOpenAI:EmbeddingDeployment"] ?? "";
+            var aoai = config.GetSection("AzureOpenAI");
+            var embeddings = aoai.GetSection("EmbeddingsAgent"); // Fixed: EmbeddingsAgent not Embeddings
+
+            // Properly fall back to root endpoint if EmbeddingsAgent doesn't have one
+            var endpoint = embeddings["Endpoint"];
+            if (string.IsNullOrWhiteSpace(endpoint))
+            {
+                endpoint = aoai["Endpoint"];
+            }
+            if (string.IsNullOrWhiteSpace(endpoint))
+            {
+                throw new InvalidOperationException("No endpoint configured for Embeddings. Check AzureOpenAI:Endpoint or AzureOpenAI:EmbeddingsAgent:Endpoint");
+            }
+
+            var depName = embeddings["EmbeddingDeployment"] ?? aoai["EmbeddingDeployment"] ?? "text-embedding-3-large";
+
             return (endpoint, depName);
         }
 
         private static string GetEmbeddingsApiKey(IConfiguration config)
         {
-            var root = config.GetSection("AzureOpenAI:EmbeddingsAgent");
-            return root["ApiKey"] ?? config["AzureOpenAI:ApiKey"] ?? "";
+            var aoai = config.GetSection("AzureOpenAI");
+            var embeddings = aoai.GetSection("EmbeddingsAgent"); // Fixed: EmbeddingsAgent not Embeddings
+
+            // Properly fall back to root API key if EmbeddingsAgent doesn't have one
+            var apiKey = embeddings["ApiKey"];
+            if (string.IsNullOrWhiteSpace(apiKey))
+            {
+                apiKey = aoai["ApiKey"];
+            }
+            if (string.IsNullOrWhiteSpace(apiKey))
+            {
+                throw new InvalidOperationException("No API key configured for Embeddings. Check AzureOpenAI:ApiKey or AzureOpenAI:EmbeddingsAgent:ApiKey");
+            }
+
+            return apiKey;
         }
 
         private static (string endpoint, string depName) GetDefaultQaAgentConfig(IConfiguration config)
         {
-            var endpoint = config["AzureOpenAI:Endpoint"] ?? "";
-            var depName = config["AzureOpenAI:ChatDeployment"] ?? "";
+            var aoai = config.GetSection("AzureOpenAI");
+            var defaultQa = aoai.GetSection("DefaultQaAgent");
+
+            var endpoint = defaultQa["Endpoint"] ?? aoai["Endpoint"] ?? "";
+            var depName = defaultQa["ChatDeployment"] ?? "gpt-4o";
+
             return (endpoint, depName);
         }
 
-        private static string GetDefaultQaApiKey(IConfiguration config)
+        private static string GetDefaultQaAgentApiKey(IConfiguration config)
         {
-            return config["AzureOpenAI:ApiKey"] ?? "";
+            var aoai = config.GetSection("AzureOpenAI");
+            var defaultQa = aoai.GetSection("DefaultQaAgent");
+            return defaultQa["ApiKey"] ?? aoai["ApiKey"] ?? "";
         }
 
-        private static void ShowAzureErrorHints(int status, string endpoint, string dep)
+        // ---- Error hints ----
+        private static void ShowAzureErrorHints(int httpStatus, string endpoint, string deployment)
         {
-            if (status == 404)
+            if (httpStatus == 404)
             {
-                Console.WriteLine("Hint: 404 indicates the deployment doesn't exist or endpoint is incorrect.");
-                Console.WriteLine($" • Verify a deployment named '{dep}' exists in resource: {endpoint}");
+                Console.WriteLine($"  Hints: Check deployment name '{deployment}' exists in Azure OpenAI resource.");
+                Console.WriteLine($"         Endpoint: {endpoint}");
             }
-            else if (status == 401)
+            else if (httpStatus == 401)
             {
-                Console.WriteLine("Hint: 401 indicates invalid API key for the shared/default resource.");
-                Console.WriteLine($" • Re-check the API key for resource: {endpoint}");
+                Console.WriteLine($"  Hints: Check API key is correct for endpoint {endpoint}");
             }
         }
 
-        // ---------- Console color helpers ----------
-
-        private static void Success(string s)
+        // ---- Console helpers ----
+        private static void Success(string message)
         {
             Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine(s);
+            Console.WriteLine($"✓ {message}");
             Console.ResetColor();
         }
 
-        private static void Warning(string s)
-        {
-            Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine(s);
-            Console.ResetColor();
-        }
-
-        private static void Error(string s)
+        private static void Error(string message)
         {
             Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine(s);
+            Console.WriteLine($"✗ {message}");
             Console.ResetColor();
         }
 
-        private static void Info(string s)
+        private static void Warning(string message)
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"⚠ {message}");
+            Console.ResetColor();
+        }
+
+        private static void Info(string message)
         {
             Console.ForegroundColor = ConsoleColor.Cyan;
-            Console.WriteLine(s);
+            Console.WriteLine($"ℹ {message}");
             Console.ResetColor();
         }
     }

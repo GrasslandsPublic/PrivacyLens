@@ -1,7 +1,9 @@
-﻿// Services/VectorStore.cs
+﻿// Services/VectorStore.cs - Fixed with proper NULL handling and search functionality
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Configuration;
@@ -11,244 +13,141 @@ using PrivacyLens.Models;
 
 namespace PrivacyLens.Services
 {
+    /// <summary>
+    /// Search result from vector similarity search
+    /// </summary>
+    public class SearchResult
+    {
+        public long Id { get; set; }
+        public string DocumentPath { get; set; } = string.Empty;
+        public string Content { get; set; } = string.Empty;
+        public string? DocumentTitle { get; set; }
+        public string? DocumentType { get; set; }
+        public string? SourceUrl { get; set; }
+        public double Similarity { get; set; }
+        public int ChunkIndex { get; set; }
+        public Dictionary<string, object>? Metadata { get; set; }
+    }
+
     public sealed class VectorStore : IVectorStore, IAsyncDisposable
     {
-        private const string SchemaName = "public";
-        private const string TableName = "chunks";
-
         private readonly NpgsqlDataSource _dataSource;
-        private readonly IConfiguration? _config;
-
-        // VectorStore settings
-        private readonly bool _enforceFixedDim;
         private readonly int _desiredDim;
-        private readonly string _onMismatch;   // truncate | skip | fail
+        private readonly string _schemaName;
+        private readonly string _tableName;
+        private readonly bool _verbose;
 
-        // ANN settings
-        private readonly bool _annBuild;
-        private readonly string _annMethod;    // hnsw | ivfflat
-        private readonly string _annDistance;  // cosine | l2 | ip
-        private readonly int _ivfLists;
-        private readonly int _ivfProbes;       // Query-time parameter for IVFFlat
-        private readonly int _hnswM;
-        private readonly int _hnswEfC;
-        private readonly int _hnswEfSearch;    // Query-time parameter for HNSW
+        public static string SchemaName => "public";
+        public static string TableName => "chunks";
 
         public VectorStore(IConfiguration config)
-            : this(config.GetConnectionString("Postgres")
-                 ?? config.GetConnectionString("PostgresApp")
-                 ?? throw new InvalidOperationException(
-                        "ConnectionStrings:Postgres or ConnectionStrings:PostgresApp is missing."),
-                   config)
-        { }
-
-        public VectorStore(string connectionString, IConfiguration? config = null)
         {
-            var builder = new NpgsqlDataSourceBuilder(connectionString);
-            builder.UseVector(); // register pgvector mappings
-            _dataSource = builder.Build();
-            _config = config ?? null;
+            // Try both possible connection string names for compatibility
+            var connStr = config.GetConnectionString("PostgresApp")
+                ?? config.GetConnectionString("PostgreSQL")
+                ?? throw new InvalidOperationException("Missing ConnectionStrings:PostgresApp or ConnectionStrings:PostgreSQL");
 
-            var vs = config?.GetSection("VectorStore");
-            _enforceFixedDim = vs?.GetValue("EnforceFixedDim", true) ?? true;
-            _desiredDim = vs?.GetValue("DesiredEmbeddingDim", 3072) ?? 3072;
-            _onMismatch = vs?["OnFixedDimMismatch"] ?? "fail";
+            var dataSourceBuilder = new NpgsqlDataSourceBuilder(connStr);
+            dataSourceBuilder.UseVector();
+            _dataSource = dataSourceBuilder.Build();
 
-            var ann = vs?.GetSection("Ann");
-            _annBuild = ann?.GetValue("Build", true) ?? true;
-            _annMethod = (ann?["Method"] ?? "ivfflat").ToLowerInvariant();
-            _annDistance = (ann?["Distance"] ?? "cosine").ToLowerInvariant();
-            _ivfLists = ann?.GetValue("Lists", 100) ?? 100;
-            _ivfProbes = ann?.GetValue("Probes", 10) ?? 10;  // Higher = better recall
-            _hnswM = ann?.GetValue("M", 16) ?? 16;
-            _hnswEfC = ann?.GetValue("EfConstruction", 200) ?? 200;
-            _hnswEfSearch = ann?.GetValue("EfSearch", 100) ?? 100;
-        }
-
-        public async Task<bool> CheckDatabaseConnectivityAsync(CancellationToken ct = default)
-        {
-            try
-            {
-                await using var conn = await _dataSource.OpenConnectionAsync(ct);
-                await using var cmd = new NpgsqlCommand("SELECT 1", conn);
-                var result = await cmd.ExecuteScalarAsync(ct);
-                return result != null && Convert.ToInt32(result) == 1;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[DB Connectivity] Error: {ex.Message}");
-                return false;
-            }
+            _desiredDim = config.GetValue<int>("VectorStore:DesiredEmbeddingDim", 3072);
+            _schemaName = SchemaName;
+            _tableName = TableName;
+            _verbose = config.GetValue<bool>("VectorStore:Verbose", false);
         }
 
         public async Task InitializeAsync(CancellationToken ct = default)
         {
             await using var conn = await _dataSource.OpenConnectionAsync(ct);
 
-            // 1) Ensure pgvector extension
-            await ExecAsync(conn, "CREATE EXTENSION IF NOT EXISTS vector;", ct);
-
-            // Reload types to recognize vector type
-            await conn.ReloadTypesAsync();
-
-            // 2) Check if table exists and get current structure
-            var tableExists = await TableExistsAsync(conn, ct);
-
-            if (!tableExists)
-            {
-                Console.WriteLine("[VectorStore] Creating chunks table with enhanced schema...");
-
-                // Build SQL using string.Format to avoid interpolation issues
-                var createSql = string.Format(@"
-                CREATE TABLE {0}.{1} (
-                    -- Core fields
-                    id                BIGSERIAL PRIMARY KEY,
-                    app_id            TEXT,
-                    document_path     TEXT NOT NULL,
-                    chunk_index       INT NOT NULL,
-                    content           TEXT NOT NULL,
-                    embedding         VECTOR({2}),
-                    
-                    -- Document metadata
-                    document_title    TEXT,
-                    document_type     TEXT,
-                    document_category TEXT,
-                    document_hash     TEXT,
-                    
-                    -- Classification
-                    doc_structure     TEXT,
-                    sensitivity       TEXT,
-                    chunking_strategy TEXT,
-                    
-                    -- Source tracking
-                    source_url        TEXT,
-                    source_section    TEXT,
-                    page_number       INT,
-                    
-                    -- Compliance fields
-                    jurisdiction      TEXT,
-                    regulation_refs   TEXT[],
-                    risk_level        TEXT,
-                    requires_review   BOOLEAN DEFAULT FALSE,
-                    
-                    -- PIA fields
-                    data_elements     TEXT[],
-                    third_parties     TEXT[],
-                    retention_period  TEXT,
-                    
-                    -- Timestamps
-                    created_at        TIMESTAMPTZ DEFAULT now(),
-                    updated_at        TIMESTAMPTZ DEFAULT now(),
-                    indexed_at        TIMESTAMPTZ DEFAULT now(),
-                    document_date     DATE,
-                    
-                    -- Quality tracking
-                    confidence_score  FLOAT,
-                    token_count       INT,
-                    overlap_previous  INT,
-                    overlap_next      INT,
-                    
-                    -- Flexible metadata
-                    metadata          JSONB DEFAULT '{3}'::jsonb
-                );", SchemaName, TableName, _desiredDim, "{}");
-
-                await ExecAsync(conn, createSql, ct);
-                Console.WriteLine($"[VectorStore] Table created with {_desiredDim} dimensions");
-            }
-
-            // 3) Check for IVFFlat index and create if needed
-            await EnsureIvfFlatIndexAsync(conn, ct);
-        }
-
-        private async Task EnsureIvfFlatIndexAsync(NpgsqlConnection conn, CancellationToken ct)
-        {
-            if (_desiredDim > 2000)
-            {
-                // Check if we have enough data for IVFFlat
-                var countSql = $"SELECT COUNT(*) FROM {SchemaName}.{TableName}";
-                var rowCount = Convert.ToInt64(await ScalarAsync(conn, countSql, ct));
-
-                if (rowCount >= 100)
-                {
-                    // Check if index already exists
-                    var indexExists = await IndexExistsAsync(conn, "idx_chunks_embedding_ivfflat", ct);
-
-                    if (!indexExists)
-                    {
-                        // Calculate optimal lists (sqrt of row count)
-                        int lists = Math.Min(Math.Max((int)Math.Sqrt(rowCount), 100), 1000);
-
-                        Console.WriteLine($"[VectorStore] Creating IVFFlat index with {lists} lists for {rowCount} rows...");
-
-                        var indexSql = $@"
-                            CREATE INDEX idx_chunks_embedding_ivfflat
-                            ON {SchemaName}.{TableName}
-                            USING ivfflat (embedding vector_cosine_ops)
-                            WITH (lists = {lists});";
-
-                        await ExecAsync(conn, indexSql, ct);
-                        Console.WriteLine("[VectorStore] IVFFlat index created successfully");
-                    }
-                }
-                else if (rowCount > 0)
-                {
-                    Console.WriteLine($"[VectorStore] Waiting for more data before creating IVFFlat index ({rowCount}/100 documents)");
-                }
-            }
-        }
-
-        /// <summary>
-        /// Saves chunks with progress callback for pipeline
-        /// </summary>
-        public async Task SaveChunksWithProgressAsync(
-            IReadOnlyList<ChunkRecord> chunks,
-            Action<int, int, string>? onRowSaved = null,
-            CancellationToken ct = default)
-        {
-            if (chunks is null || chunks.Count == 0) return;
-
-            await using var conn = await _dataSource.OpenConnectionAsync(ct);
-
-            // Check if we need to build IVFFlat index after this insert
-            var preCount = Convert.ToInt64(await ScalarAsync(conn,
-                $"SELECT COUNT(*) FROM {SchemaName}.{TableName}", ct));
-
-            var insertSql = $@"
-                INSERT INTO {SchemaName}.{TableName}
-                    (document_path, chunk_index, content, embedding, 
-                     token_count, created_at, indexed_at)
-                VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)";
-
-            for (int i = 0; i < chunks.Count; i++)
-            {
-                var ch = chunks[i];
-                await using var cmd = new NpgsqlCommand(insertSql, conn);
-                cmd.Parameters.AddWithValue(ch.DocumentPath);
-                cmd.Parameters.AddWithValue(ch.Index);
-                cmd.Parameters.AddWithValue(ch.Content);
-                cmd.Parameters.AddWithValue(new Vector(ch.Embedding));
-
-                // Calculate token count (rough estimate: ~4 chars per token)
-                var tokenCount = ch.Content.Length / 4;
-                cmd.Parameters.AddWithValue(tokenCount);
-
+            // Enable pgvector extension
+            Console.WriteLine("📦 Checking/Enabling pgvector extension...");
+            await using (var cmd = new NpgsqlCommand("CREATE EXTENSION IF NOT EXISTS vector;", conn))
                 await cmd.ExecuteNonQueryAsync(ct);
 
-                onRowSaved?.Invoke(i + 1, chunks.Count,
-                    $"{System.IO.Path.GetFileName(ch.DocumentPath)} idx={ch.Index}");
-            }
+            await conn.ReloadTypesAsync();
 
-            var postCount = preCount + chunks.Count;
+            Console.WriteLine("🏗️ Creating enhanced schema with comprehensive metadata...");
 
-            // Auto-create IVFFlat index if we just crossed the threshold
-            if (preCount < 100 && postCount >= 100 && _desiredDim > 2000)
-            {
-                await EnsureIvfFlatIndexAsync(conn, ct);
-            }
+            // Create the enhanced chunks table with all metadata fields
+            var ddl = string.Format(@"
+-- Main chunks table with enhanced metadata
+CREATE TABLE IF NOT EXISTS {1}.{2} (
+  -- Core fields
+  id                BIGSERIAL PRIMARY KEY,
+  app_id            TEXT,                     -- NULL = governance, else app identifier
+  document_path     TEXT NOT NULL,            -- Original file path
+  chunk_index       INT NOT NULL,             -- Position in document
+  content           TEXT NOT NULL,            -- The actual text content
+  embedding         VECTOR({0}),              -- Embedding vector
+  
+  -- Document metadata (nullable fields use NULL not 'NULL' string)
+  document_title    TEXT,                     -- Extracted title or filename
+  document_type     TEXT,                     -- pdf, docx, html, etc.
+  document_category TEXT,                     -- Policy & Legal, Technical, etc.
+  document_hash     TEXT,                     -- SHA-256 for deduplication
+  
+  -- Document classification
+  doc_structure     TEXT,                     -- Hierarchical, Tabular, Linear, Mixed
+  sensitivity       TEXT,                     -- Public, Internal, Confidential, Personal
+  chunking_strategy TEXT,                     -- Recursive, Structure-Aware, Table-Aware, etc.
+  
+  -- Source tracking
+  source_url        TEXT,                     -- If scraped from web
+  source_section    TEXT,                     -- Section/chapter in source document
+  page_number       INT,                      -- Page number if applicable
+  
+  -- Compliance & governance fields
+  jurisdiction      TEXT,                     -- Alberta, Canada, etc.
+  regulation_refs   TEXT[],                   -- Array of regulation references
+  risk_level        TEXT,                     -- High, Medium, Low
+  requires_review   BOOLEAN DEFAULT false,
+  
+  -- Data governance
+  data_elements     TEXT[],                   -- Types of data mentioned
+  third_parties     TEXT[],                   -- Third parties mentioned
+  retention_period  TEXT,                     -- Document retention requirements
+  
+  -- Timestamps
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  indexed_at        TIMESTAMPTZ,
+  document_date     DATE,                     -- Date of the document itself
+  
+  -- Quality & processing metadata
+  confidence_score  FLOAT,                    -- Extraction confidence
+  token_count       INT,                      -- Number of tokens in chunk
+  overlap_previous  INT,                      -- Overlap tokens with previous chunk
+  overlap_next      INT,                      -- Overlap tokens with next chunk
+  
+  -- Extensible JSON metadata
+  metadata          JSONB DEFAULT '{{}}'::jsonb,
+  
+  -- Full-text search
+  tsv               TSVECTOR GENERATED ALWAYS AS (
+    setweight(to_tsvector('english', COALESCE(document_title, '')), 'A') ||
+    setweight(to_tsvector('english', content), 'B')
+  ) STORED
+);
+
+-- Indexes for performance
+CREATE INDEX IF NOT EXISTS idx_{2}_document_path ON {1}.{2} (document_path);
+CREATE INDEX IF NOT EXISTS idx_{2}_app_id ON {1}.{2} (app_id);
+CREATE INDEX IF NOT EXISTS idx_{2}_document_type ON {1}.{2} (document_type);
+CREATE INDEX IF NOT EXISTS idx_{2}_tsv ON {1}.{2} USING GIN (tsv);
+CREATE INDEX IF NOT EXISTS idx_{2}_metadata ON {1}.{2} USING GIN (metadata);
+CREATE INDEX IF NOT EXISTS idx_{2}_created_at ON {1}.{2} (created_at DESC);
+", _desiredDim, _schemaName, _tableName);
+
+            await using (var cmd = new NpgsqlCommand(ddl, conn))
+                await cmd.ExecuteNonQueryAsync(ct);
+
+            Console.WriteLine("✅ Schema initialization complete!");
         }
 
         /// <summary>
-        /// Saves chunks with enhanced metadata for PIA system
+        /// Saves chunks with proper NULL handling for metadata
         /// </summary>
         public async Task SaveChunksAsync(IReadOnlyList<ChunkRecord> chunks, CancellationToken ct = default)
         {
@@ -256,297 +155,272 @@ namespace PrivacyLens.Services
 
             await using var conn = await _dataSource.OpenConnectionAsync(ct);
 
-            // Check if we need to build IVFFlat index after this insert
-            var preCount = Convert.ToInt64(await ScalarAsync(conn,
-                $"SELECT COUNT(*) FROM {SchemaName}.{TableName}", ct));
-
             var insertSql = $@"
-                INSERT INTO {SchemaName}.{TableName}
-                    (document_path, chunk_index, content, embedding, 
-                     token_count, created_at, indexed_at)
-                VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)";
+                INSERT INTO {_schemaName}.{_tableName} (
+                    app_id, document_path, chunk_index, content, embedding,
+                    document_title, document_type, document_category, document_hash,
+                    doc_structure, sensitivity, chunking_strategy,
+                    source_url, source_section, page_number,
+                    jurisdiction, regulation_refs, risk_level, requires_review,
+                    data_elements, third_parties, retention_period,
+                    document_date, confidence_score, token_count,
+                    overlap_previous, overlap_next, metadata,
+                    created_at, updated_at, indexed_at
+                ) VALUES (
+                    @app_id, @document_path, @chunk_index, @content, @embedding,
+                    @document_title, @document_type, @document_category, @document_hash,
+                    @doc_structure, @sensitivity, @chunking_strategy,
+                    @source_url, @source_section, @page_number,
+                    @jurisdiction, @regulation_refs, @risk_level, @requires_review,
+                    @data_elements, @third_parties, @retention_period,
+                    @document_date, @confidence_score, @token_count,
+                    @overlap_previous, @overlap_next, @metadata,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )";
 
-            foreach (var ch in chunks)
+            var saved = 0;
+            foreach (var chunk in chunks)
             {
                 await using var cmd = new NpgsqlCommand(insertSql, conn);
-                cmd.Parameters.AddWithValue(ch.DocumentPath);
-                cmd.Parameters.AddWithValue(ch.Index);
-                cmd.Parameters.AddWithValue(ch.Content);
-                cmd.Parameters.AddWithValue(new Vector(ch.Embedding));
 
-                // Calculate token count (rough estimate: ~4 chars per token)
-                var tokenCount = ch.Content.Length / 4;
-                cmd.Parameters.AddWithValue(tokenCount);
+                // Core fields (never null)
+                cmd.Parameters.AddWithValue("@app_id", DBNull.Value); // NULL for governance
+                cmd.Parameters.AddWithValue("@document_path", chunk.DocumentPath);
+                cmd.Parameters.AddWithValue("@chunk_index", chunk.Index);
+                cmd.Parameters.AddWithValue("@content", chunk.Content);
+                cmd.Parameters.AddWithValue("@embedding", new Vector(chunk.Embedding));
+
+                // Document metadata - use DBNull.Value for actual NULLs
+                cmd.Parameters.AddWithValue("@document_title",
+                    (object?)chunk.DocumentTitle ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@document_type",
+                    (object?)chunk.DocumentType ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@document_category",
+                    (object?)chunk.DocumentCategory ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@document_hash",
+                    (object?)chunk.DocumentHash ?? DBNull.Value);
+
+                // Classification
+                cmd.Parameters.AddWithValue("@doc_structure",
+                    (object?)chunk.DocStructure ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@sensitivity",
+                    (object?)chunk.Sensitivity ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@chunking_strategy",
+                    (object?)chunk.ChunkingStrategy ?? DBNull.Value);
+
+                // Source tracking
+                cmd.Parameters.AddWithValue("@source_url",
+                    (object?)chunk.SourceUrl ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@source_section",
+                    (object?)chunk.SourceSection ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@page_number",
+                    (object?)chunk.PageNumber ?? DBNull.Value);
+
+                // Compliance
+                cmd.Parameters.AddWithValue("@jurisdiction",
+                    (object?)chunk.Jurisdiction ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@regulation_refs",
+                    (object?)chunk.RegulationRefs ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@risk_level",
+                    (object?)chunk.RiskLevel ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@requires_review",
+                    chunk.RequiresReview);
+
+                // Data governance
+                cmd.Parameters.AddWithValue("@data_elements",
+                    (object?)chunk.DataElements ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@third_parties",
+                    (object?)chunk.ThirdParties ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@retention_period",
+                    (object?)chunk.RetentionPeriod ?? DBNull.Value);
+
+                // Timing & quality
+                cmd.Parameters.AddWithValue("@document_date",
+                    (object?)chunk.DocumentDate ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@confidence_score",
+                    (object?)chunk.ConfidenceScore ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@token_count",
+                    (object?)chunk.TokenCount ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@overlap_previous",
+                    (object?)chunk.OverlapPrevious ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@overlap_next",
+                    (object?)chunk.OverlapNext ?? DBNull.Value);
+
+                // Metadata JSON - ensure it's a valid JSON object
+                var metadataJson = chunk.Metadata != null && chunk.Metadata.Any()
+                    ? JsonSerializer.Serialize(chunk.Metadata)
+                    : "{}";
+                cmd.Parameters.AddWithValue("@metadata",
+                    NpgsqlTypes.NpgsqlDbType.Jsonb, metadataJson);
 
                 await cmd.ExecuteNonQueryAsync(ct);
+                saved++;
+
+                if (_verbose && saved % 10 == 0)
+                {
+                    Console.WriteLine($"  Saved {saved}/{chunks.Count} chunks...");
+                }
             }
 
-            var postCount = preCount + chunks.Count;
+            Console.WriteLine($"✅ Saved {saved} chunks to database");
 
-            // Auto-create IVFFlat index if we just crossed the threshold
-            if (preCount < 100 && postCount >= 100 && _desiredDim > 2000)
+            // Check if we need to create index
+            var totalRows = await GetRowCountAsync(conn, ct);
+            if (totalRows >= 100)
             {
                 await EnsureIvfFlatIndexAsync(conn, ct);
             }
         }
 
+        private async Task<long> GetRowCountAsync(NpgsqlConnection conn, CancellationToken ct)
+        {
+            var countSql = $"SELECT COUNT(*) FROM {_schemaName}.{_tableName}";
+            await using var cmd = new NpgsqlCommand(countSql, conn);
+            var result = await cmd.ExecuteScalarAsync(ct);
+            return Convert.ToInt64(result);
+        }
+
+        private async Task EnsureIvfFlatIndexAsync(NpgsqlConnection conn, CancellationToken ct)
+        {
+            // Check if index exists
+            var checkSql = @"
+                SELECT EXISTS (
+                    SELECT 1 FROM pg_indexes 
+                    WHERE schemaname = @schema 
+                    AND tablename = @table 
+                    AND indexname = @index
+                )";
+
+            await using var checkCmd = new NpgsqlCommand(checkSql, conn);
+            checkCmd.Parameters.AddWithValue("@schema", _schemaName);
+            checkCmd.Parameters.AddWithValue("@table", _tableName);
+            checkCmd.Parameters.AddWithValue("@index", "idx_chunks_embedding_ivfflat");
+
+            var exists = (bool)(await checkCmd.ExecuteScalarAsync(ct) ?? false);
+
+            if (!exists && _desiredDim <= 2000) // IVFFlat has dimension limit
+            {
+                var rowCount = await GetRowCountAsync(conn, ct);
+                int lists = Math.Min(Math.Max((int)Math.Sqrt(rowCount), 100), 1000);
+
+                Console.WriteLine($"📊 Creating IVFFlat index with {lists} lists for {rowCount} rows...");
+
+                var indexSql = $@"
+                    CREATE INDEX idx_chunks_embedding_ivfflat
+                    ON {_schemaName}.{_tableName}
+                    USING ivfflat (embedding vector_cosine_ops)
+                    WITH (lists = {lists})";
+
+                await using var indexCmd = new NpgsqlCommand(indexSql, conn);
+                await indexCmd.ExecuteNonQueryAsync(ct);
+
+                Console.WriteLine("✅ IVFFlat index created successfully");
+            }
+        }
+
+        public async Task<NpgsqlConnection> CreateConnectionAsync()
+        {
+            return await _dataSource.OpenConnectionAsync();
+        }
+
         /// <summary>
-        /// Enhanced vector similarity search with IVFFlat optimization
+        /// Search for similar chunks using vector similarity
         /// </summary>
         public async Task<List<SearchResult>> SearchAsync(
             float[] queryVector,
-            int topK = 5,
+            int topK = 10,
             string? appId = null,
-            Dictionary<string, object>? filters = null,
             CancellationToken ct = default)
         {
             await using var conn = await _dataSource.OpenConnectionAsync(ct);
 
-            // Set IVFFlat probes for better recall (if using IVFFlat)
-            if (_desiredDim > 2000)
-            {
-                await ExecAsync(conn, $"SET ivfflat.probes = {_ivfProbes};", ct);
-                Console.WriteLine($"[Search] Using IVFFlat with {_ivfProbes} probes");
-            }
-
-            // Build query with optional filters
-            var whereClauses = new List<string>();
-            var parameters = new List<NpgsqlParameter>();
-
-            // App filter
-            if (appId != null)
-            {
-                whereClauses.Add("app_id = @appId");
-                parameters.Add(new NpgsqlParameter("appId", appId));
-            }
-            else if (appId == "")  // Explicitly searching governance (NULL app_id)
-            {
-                whereClauses.Add("app_id IS NULL");
-            }
-
-            // Additional filters
-            if (filters != null)
-            {
-                foreach (var filter in filters)
-                {
-                    if (filter.Key == "document_category")
-                    {
-                        whereClauses.Add("document_category = @category");
-                        parameters.Add(new NpgsqlParameter("category", filter.Value));
-                    }
-                    else if (filter.Key == "sensitivity")
-                    {
-                        whereClauses.Add("sensitivity = @sensitivity");
-                        parameters.Add(new NpgsqlParameter("sensitivity", filter.Value));
-                    }
-                    else if (filter.Key == "requires_review")
-                    {
-                        whereClauses.Add("requires_review = @review");
-                        parameters.Add(new NpgsqlParameter("review", filter.Value));
-                    }
-                }
-            }
-
-            var whereClause = whereClauses.Count > 0
-                ? "WHERE " + string.Join(" AND ", whereClauses)
-                : "";
-
+            // Build the search query
             var searchSql = $@"
                 SELECT 
                     id,
                     document_path,
                     chunk_index,
                     content,
-                    1 - (embedding <=> @qvec) as similarity,
                     document_title,
-                    document_category,
-                    source_section,
-                    metadata
-                FROM {SchemaName}.{TableName}
-                {whereClause}
-                ORDER BY embedding <=> @qvec
-                LIMIT @k";
+                    document_type,
+                    source_url,
+                    metadata,
+                    1 - (embedding <=> @query_vector) as similarity
+                FROM {_schemaName}.{_tableName}
+                WHERE (@app_id IS NULL AND app_id IS NULL) OR (app_id = @app_id)
+                ORDER BY embedding <=> @query_vector
+                LIMIT @limit";
 
             await using var cmd = new NpgsqlCommand(searchSql, conn);
-            cmd.Parameters.AddWithValue("qvec", new Vector(queryVector));
-            cmd.Parameters.AddWithValue("k", topK);
-            foreach (var param in parameters)
-            {
-                cmd.Parameters.Add(param);
-            }
+            cmd.Parameters.AddWithValue("@query_vector", new Vector(queryVector));
+            cmd.Parameters.AddWithValue("@app_id", (object?)appId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@limit", topK);
 
             var results = new List<SearchResult>();
             await using var reader = await cmd.ExecuteReaderAsync(ct);
 
             while (await reader.ReadAsync(ct))
             {
-                results.Add(new SearchResult
+                var result = new SearchResult
                 {
                     Id = reader.GetInt64(0),
                     DocumentPath = reader.GetString(1),
                     ChunkIndex = reader.GetInt32(2),
                     Content = reader.GetString(3),
-                    Similarity = reader.GetFloat(4),
-                    DocumentTitle = reader.IsDBNull(5) ? null : reader.GetString(5),
-                    DocumentCategory = reader.IsDBNull(6) ? null : reader.GetString(6),
-                    SourceSection = reader.IsDBNull(7) ? null : reader.GetString(7),
-                    Metadata = reader.IsDBNull(8) ? null : reader.GetFieldValue<Dictionary<string, object>?>(8)
-                });
+                    DocumentTitle = reader.IsDBNull(4) ? null : reader.GetString(4),
+                    DocumentType = reader.IsDBNull(5) ? null : reader.GetString(5),
+                    SourceUrl = reader.IsDBNull(6) ? null : reader.GetString(6),
+                    Similarity = reader.GetDouble(8)
+                };
+
+                // Parse metadata JSON if present
+                if (!reader.IsDBNull(7))
+                {
+                    var metadataJson = reader.GetString(7);
+                    try
+                    {
+                        result.Metadata = JsonSerializer.Deserialize<Dictionary<string, object>>(metadataJson);
+                    }
+                    catch
+                    {
+                        // Ignore JSON parsing errors
+                    }
+                }
+
+                results.Add(result);
             }
 
             return results;
         }
 
         /// <summary>
-        /// Hybrid search combining vector similarity and full-text search
+        /// Check database connectivity
         /// </summary>
-        public async Task<List<SearchResult>> HybridSearchAsync(
-            float[] queryVector,
-            string textQuery,
-            int topK = 5,
-            string? appId = null,
-            CancellationToken ct = default)
+        public async Task<bool> CheckDatabaseConnectivityAsync()
         {
-            await using var conn = await _dataSource.OpenConnectionAsync(ct);
-
-            // Set IVFFlat probes
-            if (_desiredDim > 2000)
+            try
             {
-                await ExecAsync(conn, $"SET ivfflat.probes = {_ivfProbes};", ct);
+                await using var conn = await _dataSource.OpenConnectionAsync();
+
+                // Simple connectivity test
+                await using var cmd = new NpgsqlCommand("SELECT 1", conn);
+                var result = await cmd.ExecuteScalarAsync();
+
+                return result != null && Convert.ToInt32(result) == 1;
             }
-
-            var appFilter = appId != null
-                ? "app_id = @appId"
-                : appId == ""
-                    ? "app_id IS NULL"
-                    : "TRUE";
-
-            // Combine vector and text search using RRF (Reciprocal Rank Fusion)
-            var hybridSql = $@"
-                WITH vector_search AS (
-                    SELECT id, 
-                           embedding <=> @qvec as distance,
-                           ROW_NUMBER() OVER (ORDER BY embedding <=> @qvec) as vec_rank
-                    FROM {SchemaName}.{TableName}
-                    WHERE {appFilter}
-                    ORDER BY embedding <=> @qvec
-                    LIMIT @k * 2
-                ),
-                text_search AS (
-                    SELECT id,
-                           ts_rank(tsv, plainto_tsquery('english', @textq)) as score,
-                           ROW_NUMBER() OVER (ORDER BY ts_rank(tsv, plainto_tsquery('english', @textq)) DESC) as text_rank
-                    FROM {SchemaName}.{TableName}
-                    WHERE {appFilter} AND tsv @@ plainto_tsquery('english', @textq)
-                    LIMIT @k * 2
-                ),
-                combined AS (
-                    SELECT 
-                        COALESCE(v.id, t.id) as id,
-                        1.0 / (60 + COALESCE(v.vec_rank, 1000)) + 
-                        1.0 / (60 + COALESCE(t.text_rank, 1000)) as rrf_score
-                    FROM vector_search v
-                    FULL OUTER JOIN text_search t ON v.id = t.id
-                    ORDER BY rrf_score DESC
-                    LIMIT @k
-                )
-                SELECT 
-                    c.id,
-                    ch.document_path,
-                    ch.chunk_index,
-                    ch.content,
-                    c.rrf_score,
-                    ch.document_title,
-                    ch.document_category,
-                    ch.source_section,
-                    ch.metadata
-                FROM combined c
-                JOIN {SchemaName}.{TableName} ch ON c.id = ch.id
-                ORDER BY c.rrf_score DESC";
-
-            await using var cmd = new NpgsqlCommand(hybridSql, conn);
-            cmd.Parameters.AddWithValue("qvec", new Vector(queryVector));
-            cmd.Parameters.AddWithValue("textq", textQuery);
-            cmd.Parameters.AddWithValue("k", topK);
-            if (appId != null)
+            catch (Exception ex)
             {
-                cmd.Parameters.AddWithValue("appId", appId);
-            }
-
-            var results = new List<SearchResult>();
-            await using var reader = await cmd.ExecuteReaderAsync(ct);
-
-            while (await reader.ReadAsync(ct))
-            {
-                results.Add(new SearchResult
+                if (_verbose)
                 {
-                    Id = reader.GetInt64(0),
-                    DocumentPath = reader.GetString(1),
-                    ChunkIndex = reader.GetInt32(2),
-                    Content = reader.GetString(3),
-                    Similarity = reader.GetFloat(4),
-                    DocumentTitle = reader.IsDBNull(5) ? null : reader.GetString(5),
-                    DocumentCategory = reader.IsDBNull(6) ? null : reader.GetString(6),
-                    SourceSection = reader.IsDBNull(7) ? null : reader.GetString(7),
-                    Metadata = reader.IsDBNull(8) ? null : reader.GetFieldValue<Dictionary<string, object>?>(8)
-                });
+                    Console.WriteLine($"[VectorStore] Database connectivity check failed: {ex.Message}");
+                }
+                return false;
             }
-
-            return results;
         }
 
-        public ValueTask DisposeAsync() => _dataSource.DisposeAsync();
-
-        // Helper methods
-        private static async Task ExecAsync(NpgsqlConnection conn, string sql, CancellationToken ct)
+        public async ValueTask DisposeAsync()
         {
-            await using var cmd = new NpgsqlCommand(sql, conn);
-            await cmd.ExecuteNonQueryAsync(ct);
+            await _dataSource.DisposeAsync();
         }
-
-        private static async Task<object?> ScalarAsync(NpgsqlConnection conn, string sql, CancellationToken ct)
-        {
-            await using var cmd = new NpgsqlCommand(sql, conn);
-            return await cmd.ExecuteScalarAsync(ct);
-        }
-
-        private async Task<bool> TableExistsAsync(NpgsqlConnection conn, CancellationToken ct)
-        {
-            var sql = @"
-                SELECT COUNT(*) 
-                FROM information_schema.tables 
-                WHERE table_schema = @schema AND table_name = @table";
-
-            await using var cmd = new NpgsqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue("schema", SchemaName);
-            cmd.Parameters.AddWithValue("table", TableName);
-
-            var count = Convert.ToInt32(await cmd.ExecuteScalarAsync(ct));
-            return count > 0;
-        }
-
-        private async Task<bool> IndexExistsAsync(NpgsqlConnection conn, string indexName, CancellationToken ct)
-        {
-            var sql = "SELECT COUNT(*) FROM pg_indexes WHERE indexname = @name";
-            await using var cmd = new NpgsqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue("name", indexName);
-
-            var count = Convert.ToInt32(await cmd.ExecuteScalarAsync(ct));
-            return count > 0;
-        }
-    }
-
-    // Search result model
-    public class SearchResult
-    {
-        public long Id { get; set; }
-        public string DocumentPath { get; set; } = string.Empty;
-        public int ChunkIndex { get; set; }
-        public string Content { get; set; } = string.Empty;
-        public float Similarity { get; set; }
-        public string? DocumentTitle { get; set; }
-        public string? DocumentCategory { get; set; }
-        public string? SourceSection { get; set; }
-        public Dictionary<string, object>? Metadata { get; set; }
     }
 }
