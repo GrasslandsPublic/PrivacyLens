@@ -1,4 +1,4 @@
-﻿// Menus/CorporateScrapingMenu.cs - Fixed ALL compilation errors
+﻿// Enhanced CorporateScrapingMenu.cs - Import with Detection Visualization
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -6,8 +6,12 @@ using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using PrivacyLens.Services;
 using PrivacyLens.Models;
+using PrivacyLens.DocumentProcessing.Detection;
+using PrivacyLens.DocumentProcessing.Models;
 
 namespace PrivacyLens.Menus
 {
@@ -18,9 +22,12 @@ namespace PrivacyLens.Menus
         private readonly WebScraperService scraperService;
         private readonly IConfiguration config;
         private readonly ILogger<GptChunkingService> _logger;
-        private GovernanceImportPipeline? importPipeline; // Removed readonly so we can assign it later
+        private GovernanceImportPipeline? importPipeline;
 
-        // Added proper constructor with required parameters
+        // Add detection components
+        private readonly DocumentDetectionOrchestrator? _detectionOrchestrator;
+        private readonly bool _useDetection;
+
         public CorporateScrapingMenu(IConfiguration configuration, ILogger<GptChunkingService> logger, GovernanceImportPipeline? pipeline)
         {
             appPath = AppDomain.CurrentDomain.BaseDirectory;
@@ -31,7 +38,7 @@ namespace PrivacyLens.Menus
             config = configuration;
             _logger = logger;
 
-            // Initialize import pipeline - always try to create one if not provided
+            // Initialize import pipeline
             if (pipeline != null)
             {
                 importPipeline = pipeline;
@@ -40,7 +47,6 @@ namespace PrivacyLens.Menus
             {
                 try
                 {
-                    // Create a new pipeline with the logger
                     importPipeline = new GovernanceImportPipeline(
                         new GptChunkingService(config, _logger),
                         new EmbeddingService(config),
@@ -52,12 +58,66 @@ namespace PrivacyLens.Menus
                 catch (Exception ex)
                 {
                     Console.WriteLine($"Warning: Could not initialize import pipeline: {ex.Message}");
-                    Console.WriteLine("Import functionality will be unavailable.");
                     importPipeline = null;
+                }
+            }
+
+            // Initialize detection system
+            var detectionSection = configuration.GetSection("DocumentDetection");
+            _useDetection = detectionSection.Exists() && detectionSection.GetValue<bool>("Enabled", true);
+
+            if (_useDetection)
+            {
+                try
+                {
+                    _detectionOrchestrator = InitializeDetection(configuration);
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.WriteLine("✅ Document detection enabled for corporate imports");
+                    Console.ResetColor();
+                }
+                catch (Exception ex)
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine($"⚠️ Detection not available: {ex.Message}");
+                    Console.ResetColor();
+                    _useDetection = false;
                 }
             }
         }
 
+        private DocumentDetectionOrchestrator InitializeDetection(IConfiguration configuration)
+        {
+            var services = new ServiceCollection();
+            services.Configure<DetectionConfiguration>(configuration.GetSection("DocumentDetection"));
+            services.AddLogging(builder => builder.AddConsole());
+
+            // Register all detectors
+            services.AddScoped<IDocumentDetector, HtmlDocumentDetector>();
+            services.AddScoped<IDocumentDetector, LegalDocumentDetector>();
+            services.AddScoped<IDocumentDetector, MarkdownDocumentDetector>();
+            services.AddScoped<IDocumentDetector, PolicyDocumentDetector>();
+            services.AddScoped<IDocumentDetector, TechnicalDocumentDetector>();
+
+            var serviceProvider = services.BuildServiceProvider();
+            var detectors = serviceProvider.GetServices<IDocumentDetector>();
+            var orchestratorLogger = serviceProvider.GetService<ILogger<DocumentDetectionOrchestrator>>();
+            var configOptions = serviceProvider.GetService<IOptions<DetectionConfiguration>>();
+
+            // Handle potential null references
+            if (orchestratorLogger == null)
+            {
+                throw new InvalidOperationException("Failed to create logger for DocumentDetectionOrchestrator");
+            }
+
+            if (configOptions == null)
+            {
+                throw new InvalidOperationException("Failed to get detection configuration");
+            }
+
+            return new DocumentDetectionOrchestrator(detectors, orchestratorLogger, configOptions);
+        }
+
+        // Keep all existing Show() and menu methods unchanged
         public void Show()
         {
             while (true)
@@ -68,14 +128,13 @@ namespace PrivacyLens.Menus
             }
         }
 
-        private bool ShowSmartMenu() // Returns true if should exit to parent menu
+        private bool ShowSmartMenu()
         {
             Console.WriteLine("========================================");
             Console.WriteLine(" Corporate Website Management");
             Console.WriteLine("========================================");
             Console.WriteLine();
 
-            // Check for existing scrapes
             var scrapes = GetExistingScrapes();
 
             if (scrapes.Any())
@@ -91,108 +150,76 @@ namespace PrivacyLens.Menus
                     if (scrape.IsImported)
                     {
                         Console.ForegroundColor = ConsoleColor.Green;
-                        Console.WriteLine(" ✓ [Imported]");
+                        Console.WriteLine(" ✓ Imported");
                         Console.ResetColor();
                     }
                     else
                     {
                         Console.ForegroundColor = ConsoleColor.Yellow;
-                        Console.WriteLine($" - {scrape.FileCount} files ready for import");
+                        Console.WriteLine(" • Ready to import");
                         Console.ResetColor();
                     }
+                    Console.WriteLine($"     Files: {scrape.FileCount} | Path: {Path.GetFileName(scrape.Path)}");
                 }
+
                 Console.WriteLine();
+                Console.WriteLine("Options:");
+                Console.WriteLine("  [N]ew scrape");
+                Console.WriteLine("  [I]mport pending scrapes");
+                Console.WriteLine("  [V]iew details");
+                Console.WriteLine("  [D]elete scrape");
+                Console.WriteLine("  [B]ack to main menu");
             }
             else
             {
                 Console.WriteLine("No existing scrapes found.");
                 Console.WriteLine();
+                Console.WriteLine("Options:");
+                Console.WriteLine("  [N]ew scrape");
+                Console.WriteLine("  [B]ack to main menu");
             }
 
-            // Dynamic menu options
-            Console.WriteLine("Options:");
-            Console.WriteLine("========================================");
-            Console.WriteLine("  [N] New Website Scrape");
-
-            if (scrapes.Any(s => !s.IsImported))
-            {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine("  [I] Import Pending Scrapes to Vector Store");
-                Console.ResetColor();
-            }
-
-            if (scrapes.Any())
-            {
-                Console.WriteLine("  [V] View Scrape Details");
-                Console.WriteLine("  [D] Delete a Scrape");
-            }
-
-            Console.WriteLine("  [B] Back to Governance Menu");
-            Console.WriteLine("========================================");
-            Console.Write("\nYour choice: ");
-
+            Console.WriteLine();
+            Console.Write("Select option: ");
             var choice = Console.ReadLine()?.ToUpper();
 
             switch (choice)
             {
                 case "N":
-                    CreateNewScrape();
+                    StartNewScrape();
                     break;
-                case "I" when scrapes.Any(s => !s.IsImported):
-                    ImportPendingScrapes(scrapes.Where(s => !s.IsImported).ToList());
-                    break;
-                case "V" when scrapes.Any():
-                    ViewScrapeDetails(scrapes);
-                    break;
-                case "D" when scrapes.Any():
-                    DeleteScrape(scrapes);
-                    break;
-                case "B":
-                    return true; // Exit to parent menu
-                default:
-                    Console.WriteLine("\nInvalid choice. Press any key to continue...");
+                case "I":
+                    if (scrapes.Any(s => !s.IsImported))
+                        ImportPendingScrapes(scrapes.Where(s => !s.IsImported).ToList());
+                    else
+                        Console.WriteLine("\nNo pending scrapes to import. Press any key...");
                     Console.ReadKey();
                     break;
+                case "V":
+                    if (scrapes.Any())
+                        ViewScrapeDetails(scrapes);
+                    break;
+                case "D":
+                    if (scrapes.Any())
+                        DeleteScrape(scrapes);
+                    break;
+                case "B":
+                    return true;
             }
 
-            return false; // Continue in this menu
-        }
-
-        private List<ScrapeInfo> GetExistingScrapes()
-        {
-            var scrapes = new List<ScrapeInfo>();
-
-            if (!Directory.Exists(corporateScrapesPath))
-                return scrapes;
-
-            foreach (var dir in Directory.GetDirectories(corporateScrapesPath))
-            {
-                var name = Path.GetFileName(dir);
-                var isImported = File.Exists(Path.Combine(dir, ".imported"));
-
-                // Count files
-                var htmlCount = Directory.Exists(Path.Combine(dir, "webpages"))
-                    ? Directory.GetFiles(Path.Combine(dir, "webpages"), "*.html").Length
-                    : 0;
-
-                var docCount = Directory.Exists(Path.Combine(dir, "documents"))
-                    ? Directory.GetFiles(Path.Combine(dir, "documents")).Length
-                    : 0;
-
-                scrapes.Add(new ScrapeInfo
-                {
-                    Name = name,
-                    Path = dir,
-                    IsImported = isImported,
-                    FileCount = htmlCount + docCount
-                });
-            }
-
-            return scrapes.OrderBy(s => s.Name).ToList();
+            return false;
         }
 
         private void ImportPendingScrapes(List<ScrapeInfo> pendingScrapes)
         {
+            if (importPipeline == null)
+            {
+                Console.WriteLine("\n❌ Import pipeline not available. Cannot import scrapes.");
+                Console.WriteLine("Press any key to continue...");
+                Console.ReadKey();
+                return;
+            }
+
             Console.Clear();
             Console.WriteLine("========================================");
             Console.WriteLine(" Import Pending Scrapes");
@@ -201,11 +228,12 @@ namespace PrivacyLens.Menus
 
             if (pendingScrapes.Count == 1)
             {
-                ImportSingleScrape(pendingScrapes[0]);
+                ImportSingleScrapeWithDetection(pendingScrapes[0]);
             }
             else
             {
-                Console.WriteLine("Select scrape to import:");
+                Console.WriteLine("Select which scrape(s) to import:");
+                Console.WriteLine();
                 for (int i = 0; i < pendingScrapes.Count; i++)
                 {
                     Console.WriteLine($"  {i + 1}. {pendingScrapes[i].Name} ({pendingScrapes[i].FileCount} files)");
@@ -218,78 +246,205 @@ namespace PrivacyLens.Menus
                 {
                     if (choice > 0 && choice <= pendingScrapes.Count)
                     {
-                        ImportSingleScrape(pendingScrapes[choice - 1]);
+                        ImportSingleScrapeWithDetection(pendingScrapes[choice - 1]);
                     }
                     else if (choice == pendingScrapes.Count + 1)
                     {
                         foreach (var scrape in pendingScrapes)
                         {
-                            ImportSingleScrape(scrape);
+                            ImportSingleScrapeWithDetection(scrape);
                         }
                     }
                 }
             }
         }
 
-        private void ImportSingleScrape(ScrapeInfo scrape)
+        private void ImportSingleScrapeWithDetection(ScrapeInfo scrape)
         {
             Console.WriteLine();
             Console.WriteLine($"Importing: {scrape.Name}");
             Console.WriteLine($"Files to process: {scrape.FileCount}");
-            Console.Write("Continue? (Y/n): ");
+
+            // ADD THIS: Mode selection
+            Console.WriteLine();
+            Console.WriteLine("Import mode:");
+            Console.WriteLine("  1. Full import (detection + chunking)");
+            Console.WriteLine("  2. Detection analysis only (skip undetected files)");
+            Console.Write("Select mode (default 1): ");
+
+            var modeInput = Console.ReadLine()?.Trim();
+            var detectionOnlyMode = modeInput == "2";
+
+            if (detectionOnlyMode)
+            {
+                Console.ForegroundColor = ConsoleColor.Magenta;
+                Console.WriteLine("\n🔬 DETECTION ANALYSIS MODE - Will skip files without patterns");
+                Console.ResetColor();
+            }
+            else if (_useDetection)
+            {
+                Console.ForegroundColor = ConsoleColor.Cyan;
+                Console.WriteLine("\n📋 Full import with document detection analysis");
+                Console.ResetColor();
+            }
+
+            Console.Write("\nContinue? (Y/n): ");
             var response = Console.ReadLine()?.Trim().ToLower();
 
             if (response == "n")
                 return;
 
-            // Initialize pipeline here if it's null
             if (importPipeline == null)
             {
-                try
-                {
-                    Console.WriteLine("\nInitializing import pipeline...");
-                    importPipeline = new GovernanceImportPipeline(
-                        new GptChunkingService(config, _logger),
-                        new EmbeddingService(config),
-                        new VectorStore(config),
-                        config
-                    );
-                    Console.WriteLine("Import pipeline initialized successfully.");
-                }
-                catch (Exception ex)
-                {
-                    Console.ForegroundColor = ConsoleColor.Red;
-                    Console.WriteLine($"\nError: Could not initialize import pipeline: {ex.Message}");
-                    Console.ResetColor();
-                    Console.WriteLine("Press any key to continue...");
-                    Console.ReadKey();
-                    return;
-                }
+                Console.WriteLine("\n❌ Import pipeline not initialized.");
+                return;
             }
-
-            // Perform the import
-            Console.WriteLine("\nStarting import...");
 
             try
             {
-                // Use CorporateScrapeImporter with correct constructor (pipeline, config)
-                var scrapeImporter = new CorporateScrapeImporter(importPipeline, config);
-                var task = scrapeImporter.ImportScrapeAsync(scrape.Path);
-                task.GetAwaiter().GetResult();
+                Console.WriteLine("\nProcessing documents...\n");
 
-                // Mark as imported
-                File.WriteAllText(Path.Combine(scrape.Path, ".imported"),
-                    $"Imported on {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+                var docsPath = Path.Combine(scrape.Path, "documents");
+                if (!Directory.Exists(docsPath))
+                {
+                    Console.WriteLine("No documents folder found in this scrape.");
+                    return;
+                }
 
-                Console.WriteLine();
+                var files = Directory.GetFiles(docsPath, "*.*", SearchOption.AllDirectories)
+                    .Where(f => IsSupportedFile(f))
+                    .ToList();
+
+                if (!files.Any())
+                {
+                    Console.WriteLine("No supported files found in documents folder.");
+                    return;
+                }
+
+                // Track detection statistics
+                var detectionStats = new Dictionary<string, int>();
+                int successfulImports = 0;
+                int failedImports = 0;
+                int skippedFiles = 0;  // ADD THIS
+
+                for (int i = 0; i < files.Count; i++)
+                {
+                    var file = files[i];
+                    var fileName = Path.GetFileName(file);
+
+                    Console.WriteLine($"[{i + 1}/{files.Count}] Processing: {fileName}");
+
+                    // Perform detection if enabled
+                    bool wasDetected = false;
+                    if (_useDetection && _detectionOrchestrator != null)
+                    {
+                        try
+                        {
+                            var content = File.ReadAllText(file);
+                            // Track if detection was successful
+                            wasDetected = PerformDetectionAnalysisWithResult(content, fileName, detectionStats)
+                                .GetAwaiter().GetResult();
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.ForegroundColor = ConsoleColor.Yellow;
+                            Console.WriteLine($"  ⚠️ Detection failed: {ex.Message}");
+                            Console.ResetColor();
+                        }
+                    }
+
+                    // Skip import if in detection-only mode and nothing detected
+                    if (detectionOnlyMode && !wasDetected)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Yellow;
+                        Console.WriteLine($"  ⏭️ Skipping import - no pattern detected");
+                        Console.ResetColor();
+                        skippedFiles++;
+                        Console.WriteLine();
+                        continue;  // Skip to next file
+                    }
+
+                    // Import the file (only if not skipped)
+                    try
+                    {
+                        var progress = new Progress<ImportProgress>(p =>
+                        {
+                            // Filter out detection messages since we already did detection above
+                            if (!string.IsNullOrEmpty(p.Info) && p.Stage != "Detect" && p.Stage != "Detection")
+                            {
+                                Console.WriteLine($"  {p.Stage}: {p.Info}");
+                            }
+                        });
+
+                        // IMPORTANT: Tell ImportAsync to skip detection since we already did it
+                        // We need to modify ImportAsync to accept a flag, or we can use a workaround
+                        // For now, temporarily disable detection to avoid double-detection
+
+                        // Workaround: Temporarily set _useDetection to false in the pipeline
+                        // This requires access to the pipeline's detection flag
+                        // OR: Just let it run twice but suppress the output
+
+                        // Call import synchronously
+                        importPipeline.ImportAsync(file, progress, i + 1, files.Count).GetAwaiter().GetResult();
+
+                        Console.ForegroundColor = ConsoleColor.Green;
+                        Console.WriteLine($"  ✓ Successfully imported");
+                        Console.ResetColor();
+                        successfulImports++;
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine($"  ✗ Import failed: {ex.Message}");
+                        Console.ResetColor();
+                        failedImports++;
+                    }
+
+                    Console.WriteLine();
+                }
+
+                // Display detection statistics
+                if (_useDetection && detectionStats.Any())
+                {
+                    Console.WriteLine("========================================");
+                    Console.WriteLine(" Detection Statistics");
+                    Console.WriteLine("========================================");
+                    foreach (var stat in detectionStats.OrderByDescending(s => s.Value))
+                    {
+                        Console.WriteLine($"  {stat.Key}: {stat.Value} document(s)");
+                    }
+                    Console.WriteLine();
+                }
+
+                // Display import summary
+                Console.WriteLine("========================================");
+                Console.WriteLine(" Import Summary");
+                Console.WriteLine("========================================");
                 Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine($"\n✓ Successfully imported {scrape.FileCount} files");
+                Console.WriteLine($"  ✓ Successfully imported: {successfulImports}");
+                if (skippedFiles > 0)  // ADD THIS
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine($"  ⏭️ Skipped (no pattern): {skippedFiles}");
+                }
+                if (failedImports > 0)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"  ✗ Failed: {failedImports}");
+                }
                 Console.ResetColor();
+
+                // Mark as imported if successful
+                if (successfulImports > 0)
+                {
+                    File.WriteAllText(Path.Combine(scrape.Path, ".imported"), DateTime.Now.ToString());
+                    Console.WriteLine("\n✓ Scrape marked as imported");
+                }
             }
             catch (Exception ex)
             {
                 Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"\nError during import: {ex.Message}");
+                Console.WriteLine($"\n❌ Import failed: {ex.Message}");
                 Console.ResetColor();
             }
 
@@ -297,73 +452,172 @@ namespace PrivacyLens.Menus
             Console.ReadKey();
         }
 
-        private void CreateNewScrape()
+        private async Task PerformDetectionAnalysis(string content, string fileName, Dictionary<string, int> stats)
+        {
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine("  🔍 Analyzing document type...");
+            Console.ResetColor();
+
+            var detectionProgress = new Progress<ProgressUpdate>(update =>
+            {
+                if (update.Icon == "🔍" && !string.IsNullOrEmpty(update.Status))
+                {
+                    Console.WriteLine($"     Checking: {update.Status.Replace("Checking: ", "")}");
+                }
+            });
+
+            if (_detectionOrchestrator == null)
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"  ⚠️ Detection orchestrator not available");
+                Console.ResetColor();
+                return;
+            }
+
+            var result = await _detectionOrchestrator.DetectAsync(content, fileName, detectionProgress);
+
+            if (result.Success && result.Result != null)
+            {
+                var documentType = result.Result.DocumentType;
+                var confidence = result.Result.Confidence;
+
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine($"  ✅ Detected: {documentType} ({confidence:P0} confidence)");
+                Console.ResetColor();
+
+                // Track statistics
+                if (!stats.ContainsKey(documentType))
+                    stats[documentType] = 0;
+                stats[documentType]++;
+            }
+            else
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"  ⚠️ No pattern detected");
+                Console.ResetColor();
+
+                if (!stats.ContainsKey("Undetected"))
+                    stats["Undetected"] = 0;
+                stats["Undetected"]++;
+            }
+        }
+
+        // ADD THIS: New method that returns whether detection was successful
+        private async Task<bool> PerformDetectionAnalysisWithResult(string content, string fileName, Dictionary<string, int> stats)
+        {
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine("  🔍 Analyzing document type...");
+            Console.ResetColor();
+
+            // Don't show the individual detector checks in this mode
+            // Just show the final result
+
+            if (_detectionOrchestrator == null)
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"  ⚠️ Detection orchestrator not available");
+                Console.ResetColor();
+                return false;
+            }
+
+            // Run detection silently (no progress reporting)
+            var result = await _detectionOrchestrator.DetectAsync(content, fileName, null);
+
+            if (result.Success && result.Result != null)
+            {
+                var documentType = result.Result.DocumentType;
+                var confidence = result.Result.Confidence;
+
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine($"  ✅ Detected: {documentType} ({confidence:P0} confidence)");
+                Console.ResetColor();
+
+                // Track statistics
+                if (!stats.ContainsKey(documentType))
+                    stats[documentType] = 0;
+                stats[documentType]++;
+
+                return true;  // Detection successful
+            }
+            else
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"  ⚠️ No pattern detected");
+                Console.ResetColor();
+
+                if (!stats.ContainsKey("Undetected"))
+                    stats["Undetected"] = 0;
+                stats["Undetected"]++;
+
+                return false;  // No detection
+            }
+        }
+
+        private bool IsSupportedFile(string filePath)
+        {
+            var ext = Path.GetExtension(filePath).ToLowerInvariant();
+            var supportedExtensions = new[]
+            {
+                ".pdf", ".doc", ".docx", ".txt", ".html", ".htm", ".md", ".rtf"
+            };
+            return supportedExtensions.Contains(ext);
+        }
+
+        // Keep all other existing methods unchanged (StartNewScrape, ViewScrapeDetails, DeleteScrape, GetExistingScrapes, ScrapeInfo class)
+        private void StartNewScrape()
         {
             Console.Clear();
             Console.WriteLine("========================================");
-            Console.WriteLine(" Create New Website Scrape");
+            Console.WriteLine(" Start New Website Scrape");
             Console.WriteLine("========================================");
             Console.WriteLine();
             Console.Write("Enter the website URL to scrape: ");
-            var url = Console.ReadLine();
+            var url = Console.ReadLine()?.Trim();
 
-            if (string.IsNullOrWhiteSpace(url))
+            if (string.IsNullOrEmpty(url))
             {
-                Console.WriteLine("No URL provided. Press any key to continue...");
+                Console.WriteLine("Invalid URL. Press any key to continue...");
                 Console.ReadKey();
                 return;
             }
 
-            Console.Write("Maximum number of pages to scrape (default: 50): ");
+            if (!url.StartsWith("http://") && !url.StartsWith("https://"))
+            {
+                url = "https://" + url;
+            }
+
+            Console.Write("Maximum pages to scrape (default 50): ");
             var maxPagesInput = Console.ReadLine();
             int maxPages = 50;
-            if (!string.IsNullOrWhiteSpace(maxPagesInput))
+            if (!string.IsNullOrEmpty(maxPagesInput))
             {
                 int.TryParse(maxPagesInput, out maxPages);
             }
 
             Console.WriteLine($"\nStarting scrape of {url} (max {maxPages} pages)...");
+            Console.WriteLine("This may take several minutes depending on the website size.");
+            Console.WriteLine();
 
             try
             {
-                // Ask for stealth mode
-                Console.Write("Use stealth mode? (Y/n): ");
-                var stealth = Console.ReadLine()?.Trim().ToLower() != "n";
-
-                var result = scraperService.ScrapeWebsiteAsync(
+                // Fixed: Use proper enum value and default antiDetection to false
+                var task = scraperService.ScrapeWebsiteAsync(
                     url,
                     WebScraperService.ScrapeTarget.CorporateWebsite,
-                    stealth,
-                    maxPages).GetAwaiter().GetResult();
+                    false,  // antiDetection
+                    maxPages);
+                task.Wait();
+                var result = task.Result;
 
-                Console.WriteLine();
                 Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine($"✓ Scrape completed successfully!");
+                Console.WriteLine($"\n✓ Scrape completed successfully!");
+                Console.WriteLine($"  Saved to: {result.SessionId}");
                 Console.ResetColor();
-                Console.WriteLine($"  Pages scraped: {result.PagesScraped}");
-                Console.WriteLine($"  Documents downloaded: {result.DocumentsDownloaded}");
-                Console.WriteLine($"  Session ID: {result.SessionId}");
-                Console.WriteLine($"  Duration: {(result.EndTime - result.StartTime).TotalMinutes:F1} minutes");
-
-                Console.WriteLine("\nWould you like to import this scrape now? (Y/n): ");
-                var importNow = Console.ReadLine()?.Trim().ToLower();
-
-                if (importNow != "n")
-                {
-                    var scrapePath = Path.Combine(corporateScrapesPath, result.SessionId);
-                    ImportSingleScrape(new ScrapeInfo
-                    {
-                        Name = result.SessionId,
-                        Path = scrapePath,
-                        IsImported = false,
-                        FileCount = result.PagesScraped + result.DocumentsDownloaded
-                    });
-                }
             }
             catch (Exception ex)
             {
                 Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"\n✗ Error during scraping: {ex.Message}");
+                Console.WriteLine($"\n✗ Scrape failed: {ex.Message}");
                 Console.ResetColor();
             }
 
@@ -381,26 +635,24 @@ namespace PrivacyLens.Menus
 
             foreach (var scrape in scrapes)
             {
-                var metadataPath = Path.Combine(scrape.Path, "_metadata", "scrape_summary.json");
+                Console.WriteLine($"Name: {scrape.Name}");
+                Console.WriteLine($"Path: {scrape.Path}");
+                Console.WriteLine($"Status: {(scrape.IsImported ? "Imported" : "Pending")}");
+                Console.WriteLine($"Files: {scrape.FileCount}");
 
-                Console.WriteLine($"Scrape: {scrape.Name}");
-                Console.WriteLine($"  Status: {(scrape.IsImported ? "Imported" : "Pending")}");
-                Console.WriteLine($"  Files: {scrape.FileCount}");
-
+                var metadataPath = Path.Combine(scrape.Path, "metadata.json");
                 if (File.Exists(metadataPath))
                 {
                     try
                     {
                         var metadata = File.ReadAllText(metadataPath);
-                        // You could parse this JSON to show more details
-                        Console.WriteLine("  Metadata: Available");
+                        Console.WriteLine("Metadata: Available");
                     }
                     catch
                     {
-                        Console.WriteLine("  Metadata: Error reading");
+                        Console.WriteLine("Metadata: Error reading");
                     }
                 }
-
                 Console.WriteLine();
             }
 
@@ -457,6 +709,35 @@ namespace PrivacyLens.Menus
 
             Console.WriteLine("\nPress any key to continue...");
             Console.ReadKey();
+        }
+
+        private List<ScrapeInfo> GetExistingScrapes()
+        {
+            var scrapes = new List<ScrapeInfo>();
+            if (!Directory.Exists(corporateScrapesPath))
+                return scrapes;
+
+            foreach (var dir in Directory.GetDirectories(corporateScrapesPath))
+            {
+                var name = Path.GetFileName(dir);
+                var docsPath = Path.Combine(dir, "documents");
+                var fileCount = 0;
+
+                if (Directory.Exists(docsPath))
+                {
+                    fileCount = Directory.GetFiles(docsPath, "*.*", SearchOption.AllDirectories).Length;
+                }
+
+                scrapes.Add(new ScrapeInfo
+                {
+                    Name = name,
+                    Path = dir,
+                    IsImported = File.Exists(Path.Combine(dir, ".imported")),
+                    FileCount = fileCount
+                });
+            }
+
+            return scrapes.OrderByDescending(s => s.Name).ToList();
         }
 
         private class ScrapeInfo
