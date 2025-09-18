@@ -1,0 +1,82 @@
+name: Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+
+      - name: Show repo structure (for debugging)
+        run: |
+          echo "Listing top-level files and common project files:"
+          find . -maxdepth 2 -type f \( -name "*.sln" -o -name "*.csproj" \) -print || true
+
+      - name: Restore & Build (solutions first, then projects)
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+
+          # Prefer building solutions if present
+          slns=(**/*.sln)
+          if [ ${#slns[@]} -gt 0 ]; then
+            echo "Found ${#slns[@]} solution(s):"
+            printf ' - %s\n' "${slns[@]}"
+            for sln in "${slns[@]}"; do
+              echo "::group::Restore ${sln}"
+              dotnet restore "$sln"
+              echo "::endgroup::"
+
+              echo "::group::Build ${sln}"
+              dotnet build "$sln" -c Release --no-restore
+              echo "::endgroup::"
+            done
+          else
+            # Fall back to building all .csproj files
+            projs=(**/*.csproj)
+            if [ ${#projs[@]} -eq 0 ]; then
+              echo "No .sln or .csproj files found. Failing the build."
+              exit 1
+            fi
+            echo "Found ${#projs[@]} project(s):"
+            printf ' - %s\n' "${projs[@]}"
+            for proj in "${projs[@]}"; do
+              echo "::group::Restore ${proj}"
+              dotnet restore "$proj"
+              echo "::endgroup::"
+
+              echo "::group::Build ${proj}"
+              dotnet build "$proj" -c Release --no-restore
+              echo "::endgroup::"
+            done
+          fi
+
+      - name: Test (if any test projects exist)
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+          tests=(**/*Tests.csproj **/*.Tests.csproj **/*Test.csproj)
+          if [ ${#tests[@]} -gt 0 ]; then
+            echo "Running tests for ${#tests[@]} test project(s):"
+            printf ' - %s\n' "${tests[@]}"
+            for t in "${tests[@]}"; do
+              dotnet test "$t" -c Release --no-build --verbosity normal
+            done
+          else
+            echo "No test projects found — skipping."
+          fi
