@@ -17,20 +17,35 @@ namespace PrivacyLens.DocumentScoring.Detectors
         public override string DocumentType => "Policy & Legal";
         public override int Priority => 10;
 
-        // Tier 1: Definitive identifiers with context validation
+        // ORIGINAL: Tier 1: Definitive identifiers with context validation (AR 4027, P031, etc.)
         private static readonly Regex AlphanumericIdentifierPattern = new Regex(
             @"(?:^|\n)\s*(?:Policy|Regulation|By-?law|AR|Administrative\s+Regulation)\s*(?:Number|#|No\.?)?[\s:]*([A-Z]{2,4}[-\s]?\d{3,4}(?:\.\d+)?)",
             RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.Compiled);
 
-        // Title-based policy detection (stronger signal)
+        // NEW: Simple numeric policy codes (Policy Code: 810, Policy #: 123)
+        private static readonly Regex SimpleNumericPolicyPattern = new Regex(
+            @"Policy\s*(?:Code|Number|#|No\.?)[\s:]*(\d{1,4}(?:\.\d+)?)",
+            RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.Compiled);
+
+        // NEW: Policy Title pattern (Policy Title: School Year)
+        private static readonly Regex PolicyTitleFieldPattern = new Regex(
+            @"Policy\s+Title[\s:]+(.+?)(?:\r?\n|$)",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        // ORIGINAL: Title-based policy detection (stronger signal)
         private static readonly Regex TitlePolicyPattern = new Regex(
             @"(?:Policy|Procedure|Regulation|By-?law|Administrative\s+Regulation)[\s:]*([A-Z]{2,4}[-\s]?\d{3,4})",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-        // Metadata block patterns
+        // ORIGINAL: Metadata block patterns
         private static readonly Regex PolicyMetadataPattern = new Regex(
             @"Policy\s*(?:Number|#|No\.?)[\s:]*[\w-]+.*?Effective\s+Date[\s:]*\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}",
             RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
+
+        // NEW: Additional metadata fields pattern
+        private static readonly Regex PolicyMetadataFieldsPattern = new Regex(
+            @"(?:Cross\s+Reference|Legal\s+Reference|Adoption\s+Date|Amendment\s+Date|Effective\s+Date|Review\s+Date)[\s:]+",
+            RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.Compiled);
 
         // Negative indicators (reduce confidence)
         private static readonly HashSet<string> NonPolicyIndicators = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -50,7 +65,8 @@ namespace PrivacyLens.DocumentScoring.Detectors
         {
             "Purpose", "Scope", "Definitions", "Policy Statement",
             "Responsibilities", "Procedures", "Authority", "References",
-            "Compliance", "Enforcement", "Exceptions", "Effective Date"
+            "Compliance", "Enforcement", "Exceptions", "Effective Date",
+            "Guidelines", "Policy", "Background", "Application"  // Added Guidelines and Policy
         };
 
         public PolicyScoringDetectorEnhanced(ILogger logger = null) : base(logger) { }
@@ -186,6 +202,8 @@ namespace PrivacyLens.DocumentScoring.Detectors
 
         private bool CheckDefinitivePolicyMarkers(string content, DocumentMetadata metadata, DocumentConfidenceScore score)
         {
+            bool foundDefinitiveMarker = false;
+
             // Check if the title contains a policy identifier
             if (metadata?.Title != null)
             {
@@ -198,65 +216,116 @@ namespace PrivacyLens.DocumentScoring.Detectors
                         Value = titleMatch.Groups[1].Value,
                         Tier = EvidenceTier.Definitive,
                         Location = DocumentLocation.Title,
-                        BaseWeight = 40f,
-                        FinalScore = 40f
+                        BaseWeight = 50f,
+                        FinalScore = 50f
                     });
-
-                    // Also check for metadata block
-                    if (PolicyMetadataPattern.IsMatch(content))
-                    {
-                        score.Evidence.Add(new ScoringEvidence
-                        {
-                            Feature = "Complete Metadata Block",
-                            Value = "Present",
-                            Tier = EvidenceTier.Definitive,
-                            Location = DocumentLocation.HeaderFooter,
-                            BaseWeight = 30f,
-                            FinalScore = 30f
-                        });
-                        score.DefinitiveScore = 70f; // Combined score
-                        return true;
-                    }
+                    foundDefinitiveMarker = true;
+                    _logger?.LogDebug("Found policy identifier in title: {Identifier}", titleMatch.Groups[1].Value);
                 }
             }
 
-            // Check for policy identifier at the beginning of main content
-            var contentMatch = AlphanumericIdentifierPattern.Match(content);
-            if (contentMatch.Success && contentMatch.Index < 500)  // Must be near the beginning
+            // ORIGINAL: Check for alphanumeric policy identifiers (AR 4027, P031, etc.)
+            var alphaMatch = AlphanumericIdentifierPattern.Match(content);
+            if (alphaMatch.Success)
             {
                 score.Evidence.Add(new ScoringEvidence
                 {
-                    Feature = "Policy Identifier at Document Start",
-                    Value = contentMatch.Groups[1].Value,
+                    Feature = "Policy Alphanumeric Identifier",
+                    Value = alphaMatch.Groups[1].Value,
                     Tier = EvidenceTier.Definitive,
-                    Location = DocumentLocation.FirstParagraph,
-                    BaseWeight = 35f,
-                    FinalScore = 35f
+                    Location = DocumentLocation.BodyText,
+                    BaseWeight = 50f,
+                    FinalScore = 50f
                 });
+                foundDefinitiveMarker = true;
+                _logger?.LogDebug("Found alphanumeric policy identifier: {Identifier}", alphaMatch.Groups[1].Value);
+            }
 
-                // Check if it's a complete policy document
-                if (PolicyMetadataPattern.IsMatch(content.Substring(0, Math.Min(2000, content.Length))))
+            // NEW: Check for simple numeric policy codes (Policy Code: 810)
+            var simpleMatch = SimpleNumericPolicyPattern.Match(content);
+            if (simpleMatch.Success)
+            {
+                score.Evidence.Add(new ScoringEvidence
                 {
-                    score.DefinitiveScore = 65f; // Combined score
-                    return true;
+                    Feature = "Policy Code",
+                    Value = simpleMatch.Groups[1].Value,
+                    Tier = EvidenceTier.Definitive,
+                    Location = DocumentLocation.BodyText,
+                    BaseWeight = 50f,
+                    FinalScore = 50f
+                });
+                foundDefinitiveMarker = true;
+                _logger?.LogDebug("Found simple policy code: {Code}", simpleMatch.Groups[1].Value);
+
+                // Also check for Policy Title field
+                var policyTitleMatch = PolicyTitleFieldPattern.Match(content);
+                if (policyTitleMatch.Success)
+                {
+                    score.Evidence.Add(new ScoringEvidence
+                    {
+                        Feature = "Policy Title Field",
+                        Value = policyTitleMatch.Groups[1].Value.Trim(),
+                        Tier = EvidenceTier.Structural,
+                        Location = DocumentLocation.BodyText,
+                        BaseWeight = 30f,
+                        FinalScore = 30f
+                    });
+                    _logger?.LogDebug("Found policy title field: {Title}", policyTitleMatch.Groups[1].Value.Trim());
                 }
             }
 
-            return false;
+            // NEW: Check for multiple metadata fields
+            var metadataFieldMatches = PolicyMetadataFieldsPattern.Matches(content);
+            if (metadataFieldMatches.Count >= 2)
+            {
+                score.Evidence.Add(new ScoringEvidence
+                {
+                    Feature = $"Policy Metadata Fields",
+                    Value = $"{metadataFieldMatches.Count} fields found",
+                    Tier = EvidenceTier.Structural,
+                    Location = DocumentLocation.BodyText,
+                    BaseWeight = 40f,
+                    FinalScore = 40f
+                });
+                foundDefinitiveMarker = true;
+                _logger?.LogDebug("Found {Count} policy metadata fields", metadataFieldMatches.Count);
+            }
+
+            // ORIGINAL: Check for metadata block
+            var metadataBlockMatch = PolicyMetadataPattern.Match(content);
+            if (metadataBlockMatch.Success)
+            {
+                score.Evidence.Add(new ScoringEvidence
+                {
+                    Feature = "Policy Metadata Block",
+                    Value = "Present",
+                    Tier = EvidenceTier.Definitive,
+                    Location = DocumentLocation.BodyText,
+                    BaseWeight = 45f,
+                    FinalScore = 45f
+                });
+                foundDefinitiveMarker = true;
+                _logger?.LogDebug("Found policy metadata block");
+            }
+
+            return foundDefinitiveMarker;
         }
 
         private int CountPolicySections(string content)
         {
             int count = 0;
+            var contentLower = content.ToLowerInvariant();
+
             foreach (var section in PolicySectionHeaders)
             {
-                // Look for section headers at the beginning of lines
-                var pattern = $@"(?:^|\n)\s*{Regex.Escape(section)}\s*[:.\n]";
-                if (Regex.IsMatch(content, pattern, RegexOptions.IgnoreCase | RegexOptions.Multiline))
+                // Look for section headers with colons or as standalone lines
+                var pattern = $@"(?:^|\n)\s*{Regex.Escape(section)}\s*[:|\n]";
+                if (Regex.IsMatch(contentLower, pattern, RegexOptions.IgnoreCase | RegexOptions.Multiline))
                 {
                     count++;
                 }
             }
+
             return count;
         }
 
@@ -267,51 +336,35 @@ namespace PrivacyLens.DocumentScoring.Detectors
             DocumentConfidenceScore score,
             ScoringProfile profile)
         {
-            // Count policy sections
-            var sectionCount = CountPolicySections(content);
-            if (sectionCount >= 5)
-            {
-                score.StructuralScore += 30f;
-                score.Evidence.Add(new ScoringEvidence
-                {
-                    Feature = $"Multiple Policy Sections ({sectionCount})",
-                    Value = sectionCount.ToString(),
-                    Tier = EvidenceTier.Structural,
-                    Location = DocumentLocation.BodyText,
-                    BaseWeight = 30f,
-                    FinalScore = 30f
-                });
-            }
-            else if (sectionCount >= 3)
-            {
-                score.StructuralScore += 15f;
-                score.Evidence.Add(new ScoringEvidence
-                {
-                    Feature = $"Policy Sections ({sectionCount})",
-                    Value = sectionCount.ToString(),
-                    Tier = EvidenceTier.Structural,
-                    Location = DocumentLocation.BodyText,
-                    BaseWeight = 15f,
-                    FinalScore = 15f
-                });
-            }
+            // Check for policy-related terms in context
+            var policyTerms = new[] { "policy", "procedure", "regulation", "guideline", "directive", "standard" };
+            var termCount = policyTerms.Count(term =>
+                Regex.IsMatch(content, $@"\b{term}\b", RegexOptions.IgnoreCase));
 
-            // Check for prescriptive language density
-            var prescriptiveCount = CountPrescriptiveTerms(content);
-            var wordCount = content.Split(new[] { ' ', '\n', '\r', '\t' }, StringSplitOptions.RemoveEmptyEntries).Length;
-            var prescriptiveDensity = (float)prescriptiveCount / Math.Max(wordCount, 1) * 1000;
-
-            if (prescriptiveDensity > 5.0f)  // More than 5 prescriptive terms per 1000 words
+            if (termCount >= 3)
             {
-                score.LexicalScore += 20f;
                 score.Evidence.Add(new ScoringEvidence
                 {
-                    Feature = "High Prescriptive Language Density",
-                    Value = $"{prescriptiveDensity:F1} per 1000 words",
+                    Feature = "Policy Terminology",
+                    Value = $"{termCount} terms",
                     Tier = EvidenceTier.Lexical,
                     Location = DocumentLocation.BodyText,
                     BaseWeight = 20f,
                     FinalScore = 20f
+                });
+            }
+
+            // Check for regulatory references
+            if (Regex.IsMatch(content, @"\b(?:Act|Regulation|Statute|Law|Code)\b", RegexOptions.IgnoreCase))
+            {
+                score.Evidence.Add(new ScoringEvidence
+                {
+                    Feature = "Regulatory References",
+                    Value = "Present",
+                    Tier = EvidenceTier.Lexical,
+                    Location = DocumentLocation.BodyText,
+                    BaseWeight = 15f,
+                    FinalScore = 15f
                 });
             }
         }
@@ -322,79 +375,52 @@ namespace PrivacyLens.DocumentScoring.Detectors
             DocumentConfidenceScore score,
             ScoringProfile profile)
         {
-            // Check for hierarchical structure
-            if (features.HasNumberedSections && features.HierarchicalDepth >= 2)
+            // Check for numbered sections
+            var numberedSections = Regex.Matches(content, @"^\s*\d+\.\s+[A-Z]", RegexOptions.Multiline);
+            if (numberedSections.Count >= 3)
             {
-                score.StructuralScore += 15f;
                 score.Evidence.Add(new ScoringEvidence
                 {
-                    Feature = "Hierarchical Document Structure",
-                    Value = $"Depth {features.HierarchicalDepth}",
+                    Feature = "Numbered Sections",
+                    Value = $"{numberedSections.Count} sections",
+                    Tier = EvidenceTier.Structural,
+                    Location = DocumentLocation.BodyText,
+                    BaseWeight = 25f,
+                    FinalScore = 25f
+                });
+            }
+
+            // Check for subsections (a., b., c. or i., ii., iii.)
+            var subsections = Regex.Matches(content, @"^\s*[a-z]\.\s+|\s+[ivx]+\.\s+", RegexOptions.Multiline);
+            if (subsections.Count >= 5)
+            {
+                score.Evidence.Add(new ScoringEvidence
+                {
+                    Feature = "Subsections",
+                    Value = $"{subsections.Count} found",
                     Tier = EvidenceTier.Structural,
                     Location = DocumentLocation.BodyText,
                     BaseWeight = 15f,
                     FinalScore = 15f
                 });
             }
-
-            // Check for formal document features
-            if (features.HasMetadataBlock)
-            {
-                score.StructuralScore += 25f;
-                score.Evidence.Add(new ScoringEvidence
-                {
-                    Feature = "Formal Metadata Block",
-                    Value = "Present",
-                    Tier = EvidenceTier.Structural,
-                    Location = DocumentLocation.HeaderFooter,
-                    BaseWeight = 25f,
-                    FinalScore = 25f
-                });
-            }
         }
 
         private void ApplyNegativePenalties(string content, DocumentMetadata metadata, DocumentConfidenceScore score)
         {
-            float penalty = 0f;
+            // Already handled in HasStrongNegativeIndicators
+            // This method can apply graduated penalties for weaker negative signals
 
-            // Penalty for very short documents
-            if (content.Length < 500)
+            // Check for informal language
+            var informalTerms = new[] { "hey", "hi there", "thanks", "cheers", "lol", "fyi" };
+            var informalCount = informalTerms.Count(term =>
+                Regex.IsMatch(content, $@"\b{term}\b", RegexOptions.IgnoreCase));
+
+            if (informalCount >= 2)
             {
-                penalty += 20f;
-                _logger?.LogDebug("Applied penalty for short document length");
+                score.SetConfidence(score.NormalizedConfidence * 0.8f);
+                _logger?.LogDebug("Applied penalty for informal language");
             }
-
-            // Penalty for documents that look like lists or indexes
-            if (content.Contains("Documents | ") && content.Length < 1000)
-            {
-                penalty += 30f;
-                _logger?.LogDebug("Applied penalty for index/list page pattern");
-            }
-
-            // Penalty for high link density (suggests navigation page)
-            var linkPattern = new Regex(@"https?://|href=|<a\s+", RegexOptions.IgnoreCase);
-            var linkCount = linkPattern.Matches(content).Count;
-            if (linkCount > 20)
-            {
-                penalty += 15f;
-                _logger?.LogDebug("Applied penalty for high link density");
-            }
-
-            score.PenaltyScore = penalty;
-        }
-
-        private int CountPrescriptiveTerms(string content)
-        {
-            var prescriptiveTerms = new[] { "shall", "must", "will", "required", "mandatory", "prohibited" };
-            int count = 0;
-
-            foreach (var term in prescriptiveTerms)
-            {
-                var pattern = $@"\b{Regex.Escape(term)}\b";
-                count += Regex.Matches(content, pattern, RegexOptions.IgnoreCase).Count;
-            }
-
-            return count;
         }
 
         protected override ScoringProfile GetScoringProfile()
@@ -402,30 +428,41 @@ namespace PrivacyLens.DocumentScoring.Detectors
             return new ScoringProfile
             {
                 DocumentType = DocumentType,
-                MaxPossibleScore = 150f,
+                MaxPossibleScore = 200f,
 
                 DefinitiveFeatures = new Dictionary<string, float>
                 {
-                    ["Complete Policy Document"] = 100f,
-                    ["Policy Identifier in Title"] = 40f,
-                    ["Complete Metadata Block"] = 30f
+                    ["Policy Identifier"] = 50f,
+                    ["Policy Code"] = 50f,
+                    ["Policy Metadata Block"] = 45f,
+                    ["Administrative Regulation"] = 50f
                 },
 
                 StructuralFeatures = new Dictionary<string, float>
                 {
-                    ["Multiple Policy Sections"] = 30f,
-                    ["Hierarchical Structure"] = 15f,
-                    ["Formal Metadata"] = 25f
+                    ["Policy Sections"] = 40f,
+                    ["Regulatory Framework"] = 35f,
+                    ["Governance Structure"] = 30f,
+                    ["Policy Title Field"] = 30f,
+                    ["Policy Metadata Fields"] = 40f,
+                    ["Numbered Sections"] = 25f,
+                    ["Subsections"] = 15f,
+                    ["Hierarchical Structure"] = 20f
                 },
 
                 LexicalFeatures = new Dictionary<string, float>
                 {
-                    ["Prescriptive Language"] = 20f,
                     ["policy"] = 3f,
                     ["procedure"] = 3f,
+                    ["regulation"] = 3f,
                     ["compliance"] = 2f,
-                    ["shall"] = 2f,
-                    ["must"] = 2f
+                    ["authority"] = 2f,
+                    ["governance"] = 2f,
+                    ["shall"] = 1f,
+                    ["must"] = 1f,
+                    ["Policy Terminology"] = 20f,
+                    ["Regulatory References"] = 15f,
+                    ["Formal Language"] = 15f
                 }
             };
         }

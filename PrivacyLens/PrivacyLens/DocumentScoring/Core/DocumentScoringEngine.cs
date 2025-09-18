@@ -33,17 +33,23 @@ namespace PrivacyLens.DocumentScoring.Core
         {
             var detectors = new List<IScoringDetector>
             {
+                // HIGHEST PRIORITY: Privacy & Terms documents
+                new PrivacyTermsScoringDetector(_logger),
                 // Using the enhanced policy detector instead of the original
-                new PolicyScoringDetectorEnhanced(_logger)
-                // Add other detectors as they're implemented
-                // Uncomment these as you implement them:
-                // new TechnicalScoringDetector(_logger),
-                // new FinancialScoringDetector(_logger),
-                // new FormsScoringDetector(_logger),
-                // new BoardScoringDetector(_logger),
-                // new PrivacyScoringDetector(_logger),
-                // new SecurityScoringDetector(_logger),
-                // new WebScoringDetector(_logger)
+                new PolicyScoringDetectorEnhanced(_logger),
+                // Add the technical detector
+                new TechnicalScoringDetector(_logger),
+                // Add the financial detector  
+                new FinancialScoringDetector(_logger),
+                // Add the board document detector
+                new BoardDocumentScoringDetector(_logger),
+                // Add the forms detector
+                new FormsScoringDetector(_logger),
+                // Add the report detector
+                new ReportScoringDetector(_logger)
+                // Add other detectors as they're implemented:
+                // new CorrespondenceScoringDetector(_logger),
+                // new EducationalScoringDetector(_logger)
             };
 
             return detectors.OrderBy(d => d.Priority).ToList();

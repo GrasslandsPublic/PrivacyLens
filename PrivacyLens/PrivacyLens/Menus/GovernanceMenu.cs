@@ -1,5 +1,4 @@
-﻿// Menus/GovernanceMenu.cs — Fixed ALL compilation errors with minimal changes
-using Microsoft.Extensions.Configuration;
+﻿using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PrivacyLens.Models;
@@ -33,16 +32,13 @@ namespace PrivacyLens.Menus
                 .Build();
 
             // Create logger factory and logger
-            // Note: If AddConsole is not available, you may need to add Microsoft.Extensions.Logging.Console NuGet package
             var loggerFactory = LoggerFactory.Create(builder =>
             {
-                // builder.AddConsole(); // Uncomment after adding Microsoft.Extensions.Logging.Console package
                 builder.SetMinimumLevel(LogLevel.Information);
             });
             _logger = loggerFactory.CreateLogger<GptChunkingService>();
 
             // Initialize CorporateScrapingMenu with required parameters
-            // Pass null for pipeline so it creates its own
             corporateScrapingMenu = new CorporateScrapingMenu(config, _logger, null);
 
             // Get default source path from configuration
@@ -67,24 +63,24 @@ namespace PrivacyLens.Menus
                 Console.WriteLine("3. View Database Statistics");
                 Console.WriteLine("4. Search Documents");
                 Console.WriteLine("5. Import from Custom Folder");
-                Console.WriteLine("6. Back to Main Menu");
+                Console.WriteLine("6. Clear Database");
+                Console.WriteLine("7. Back to Main Menu");
                 Console.WriteLine();
-                Console.Write("Select option: ");
-                var choice = Console.ReadLine();
+                Console.Write("Select an option (1-7): ");
+                var choice = Console.ReadLine()?.Trim();
 
                 switch (choice)
                 {
                     case "1":
-                        ImportDocumentsFromDefaultFolder();
+                        ImportFromDefaultFolder();
                         break;
 
                     case "2":
-                        // Launch the corporate scraping submenu
                         corporateScrapingMenu.Show();
                         break;
 
                     case "3":
-                        ViewDatabaseStatistics();
+                        ViewStatistics();
                         break;
 
                     case "4":
@@ -92,30 +88,35 @@ namespace PrivacyLens.Menus
                         break;
 
                     case "5":
-                        ImportDocumentsFromCustomFolder();
+                        ImportFromCustomFolder();
                         break;
 
                     case "6":
+                        ClearDatabase();
+                        break;
+
+                    case "7":
                         return;
 
                     default:
-                        Console.WriteLine("Invalid option. Press any key to continue...");
+                        Console.WriteLine("\nInvalid option. Press any key to continue...");
                         Console.ReadKey();
                         break;
                 }
             }
         }
 
-        private void ImportDocumentsFromDefaultFolder()
+        private void ImportFromDefaultFolder()
         {
             Console.Clear();
-            Console.WriteLine("Import Documents from Default Folder");
-            Console.WriteLine("=====================================");
+            Console.WriteLine("========================================");
+            Console.WriteLine(" Import from Default Folder");
+            Console.WriteLine("========================================");
             Console.WriteLine();
             Console.WriteLine($"Default folder: {defaultSourcePath}");
             Console.WriteLine();
 
-            // Check if folder exists
+            // Check if directory has files
             if (!Directory.Exists(defaultSourcePath))
             {
                 Console.WriteLine("Default folder does not exist. Creating it now...");
@@ -126,8 +127,7 @@ namespace PrivacyLens.Menus
                 return;
             }
 
-            // Get all supported files
-            var supportedExtensions = configService.GetSupportedFileTypes();
+            var supportedExtensions = new[] { ".pdf", ".docx", ".doc", ".txt", ".html", ".md" };
             var files = Directory.GetFiles(defaultSourcePath, "*.*", SearchOption.AllDirectories)
                 .Where(f => supportedExtensions.Contains(Path.GetExtension(f).ToLower()))
                 .ToList();
@@ -136,61 +136,45 @@ namespace PrivacyLens.Menus
             if (files.Count == 0)
             {
                 Console.WriteLine("\nNo supported documents found in the default folder.");
-                Console.WriteLine("Supported types: " + string.Join(", ", supportedExtensions));
+                Console.WriteLine("Supported formats: PDF, DOCX, DOC, TXT, HTML, MD");
                 Console.WriteLine("\nPress any key to continue...");
                 Console.ReadKey();
                 return;
             }
 
-            // Show files to be imported
-            Console.WriteLine("\nFiles to import:");
-            foreach (var file in files.Take(10))
-            {
-                var size = new FileInfo(file).Length;
-                Console.WriteLine($"  • {Path.GetFileName(file)} ({size / 1024.0:F1} KB)");
-            }
-            if (files.Count > 10)
-                Console.WriteLine($"  ... and {files.Count - 10} more files");
+            Console.WriteLine("\n1. Classify documents only (no database import)");
+            Console.WriteLine("2. Full import (classify + store in database)");
+            Console.WriteLine("3. Cancel");
+            Console.Write("\nSelect option (1-3): ");
+            var option = Console.ReadLine()?.Trim();
 
-            Console.WriteLine();
-            Console.Write("Proceed with import? (Y/n): ");
-            var response = Console.ReadLine()?.Trim().ToLower();
-            if (response == "n")
-                return;
+            if (option == "3") return;
 
-            // Import the documents
-            Console.WriteLine("\nStarting import...");
-            ImportDocumentsAsync(defaultSourcePath, files).GetAwaiter().GetResult();
+            bool classifyOnly = option == "1";
+
+            Console.WriteLine($"\nStarting {(classifyOnly ? "classification" : "import")}...");
+            ImportDocumentsAsync(defaultSourcePath, files, classifyOnly).GetAwaiter().GetResult();
         }
 
-        private void ImportDocumentsFromCustomFolder()
+        private void ImportFromCustomFolder()
         {
             Console.Clear();
-            Console.WriteLine("Import Documents from Custom Folder");
-            Console.WriteLine("====================================");
+            Console.WriteLine("========================================");
+            Console.WriteLine(" Import from Custom Folder");
+            Console.WriteLine("========================================");
             Console.WriteLine();
-            Console.Write("Enter folder path: ");
-            var folderPath = Console.ReadLine();
+            Console.Write("Enter the folder path: ");
+            var folderPath = Console.ReadLine()?.Trim();
 
-            if (string.IsNullOrWhiteSpace(folderPath))
+            if (string.IsNullOrEmpty(folderPath) || !Directory.Exists(folderPath))
             {
-                Console.WriteLine("\nNo path provided.");
+                Console.WriteLine("\nInvalid folder path.");
                 Console.WriteLine("Press any key to continue...");
                 Console.ReadKey();
                 return;
             }
 
-            // Check if folder exists
-            if (!Directory.Exists(folderPath))
-            {
-                Console.WriteLine($"\nFolder does not exist: {folderPath}");
-                Console.WriteLine("Press any key to continue...");
-                Console.ReadKey();
-                return;
-            }
-
-            // Get all supported files
-            var supportedExtensions = configService.GetSupportedFileTypes();
+            var supportedExtensions = new[] { ".pdf", ".docx", ".doc", ".txt", ".html", ".md" };
             var files = Directory.GetFiles(folderPath, "*.*", SearchOption.AllDirectories)
                 .Where(f => supportedExtensions.Contains(Path.GetExtension(f).ToLower()))
                 .ToList();
@@ -203,23 +187,33 @@ namespace PrivacyLens.Menus
                 return;
             }
 
-            // Import the documents
-            Console.WriteLine("\nStarting import...");
-            ImportDocumentsAsync(folderPath, files).GetAwaiter().GetResult();
+            Console.WriteLine("\n1. Classify documents only (no database import)");
+            Console.WriteLine("2. Full import (classify + store in database)");
+            Console.WriteLine("3. Cancel");
+            Console.Write("\nSelect option (1-3): ");
+            var option = Console.ReadLine()?.Trim();
+
+            if (option == "3") return;
+
+            bool classifyOnly = option == "1";
+
+            Console.WriteLine($"\nStarting {(classifyOnly ? "classification" : "import")}...");
+            ImportDocumentsAsync(folderPath, files, classifyOnly).GetAwaiter().GetResult();
         }
 
-        private async Task ImportDocumentsAsync(string sourcePath, List<string> files)
+        private async Task ImportDocumentsAsync(string sourcePath, List<string> files, bool classifyOnly = false)
         {
             try
             {
-                // Initialize services for import - FIXED: Add logger parameter to GptChunkingService
+                // Initialize services for import
                 var chunker = new GptChunkingService(config, _logger);
                 var embed = new EmbeddingService(config);
                 var store = new VectorStore(config);
                 var pipeline = new GovernanceImportPipeline(chunker, embed, store, config);
 
-                int imported = 0;
+                int successful = 0;
                 int failed = 0;
+                var stats = new Dictionary<string, int>();
 
                 Console.WriteLine($"\nProcessing {files.Count} document(s)...\n");
 
@@ -231,58 +225,93 @@ namespace PrivacyLens.Menus
                     try
                     {
                         Console.ForegroundColor = ConsoleColor.Cyan;
-                        Console.WriteLine($"[{i + 1}/{files.Count}] Importing: {fileName}");
+                        Console.WriteLine($"[{i + 1}/{files.Count}] Processing: {fileName}");
                         Console.ResetColor();
 
-                        // Create progress reporter
-                        var progress = new Progress<ImportProgress>(p =>
+                        // Use the new simplified pipeline
+                        ClassificationResult result;
+                        if (classifyOnly)
                         {
-                            if (p.Stage != "Done" && p.Stage != "Error")
+                            result = await pipeline.ClassifyDocumentAsync(file, null);
+                        }
+                        else
+                        {
+                            // For now, ImportAsync just does classification too
+                            // TODO: When full pipeline is implemented, this will do chunking/embedding/storage
+                            result = await pipeline.ImportAsync(file, null);
+                        }
+
+                        if (result.Success)
+                        {
+                            Console.ForegroundColor = ConsoleColor.Green;
+                            Console.WriteLine($"  ✓ {result.DocumentType} ({result.Confidence:F0}% confidence, {result.ExtractedCharacters:N0} chars)");
+
+                            // Show evidence if available
+                            if (result.Evidence != null && result.Evidence.Any())
                             {
-                                Console.WriteLine($"  {p.Stage}: {p.Info ?? ""}");
+                                Console.WriteLine($"     Evidence: {string.Join(", ", result.Evidence.Take(2))}");
                             }
-                        });
 
-                        await pipeline.ImportAsync(file, progress, i + 1, files.Count);
+                            Console.ResetColor();
+                            successful++;
 
-                        Console.ForegroundColor = ConsoleColor.Green;
-                        Console.WriteLine($"  ✓ Successfully imported");
-                        Console.ResetColor();
-                        imported++;
+                            // Track statistics by document type
+                            if (!stats.ContainsKey(result.DocumentType))
+                                stats[result.DocumentType] = 0;
+                            stats[result.DocumentType]++;
+                        }
+                        else
+                        {
+                            Console.ForegroundColor = ConsoleColor.Red;
+                            Console.WriteLine($"  ✗ Failed: {result.Error}");
+                            Console.ResetColor();
+                            failed++;
+
+                            if (!stats.ContainsKey("Failed"))
+                                stats["Failed"] = 0;
+                            stats["Failed"]++;
+                        }
                     }
                     catch (Exception ex)
                     {
                         Console.ForegroundColor = ConsoleColor.Red;
-                        Console.WriteLine($"  ✗ Failed: {ex.Message}");
+                        Console.WriteLine($"  ✗ Error: {ex.Message}");
                         Console.ResetColor();
                         failed++;
+
+                        if (!stats.ContainsKey("Error"))
+                            stats["Error"] = 0;
+                        stats["Error"]++;
                     }
-
-                    Console.WriteLine();
                 }
 
-                // Summary
+                // Show summary
+                Console.WriteLine("\n========================================");
+                Console.WriteLine(" Processing Summary");
                 Console.WriteLine("========================================");
-                Console.WriteLine(" Import Complete");
-                Console.WriteLine("========================================");
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine($"  ✓ Successfully imported: {imported}");
-                Console.ResetColor();
-                if (failed > 0)
+                Console.WriteLine($"Total files: {files.Count}");
+                Console.WriteLine($"Successful: {successful}");
+                Console.WriteLine($"Failed: {failed}");
+
+                if (stats.Any())
                 {
-                    Console.ForegroundColor = ConsoleColor.Red;
-                    Console.WriteLine($"  ✗ Failed: {failed}");
-                    Console.ResetColor();
+                    Console.WriteLine("\nDocument Types Detected:");
+                    foreach (var kvp in stats.OrderByDescending(x => x.Value))
+                    {
+                        Console.WriteLine($"  {kvp.Key}: {kvp.Value} files");
+                    }
                 }
-                Console.WriteLine("========================================");
 
-                // Dispose of services
-                await store.DisposeAsync();
+                if (!classifyOnly)
+                {
+                    Console.WriteLine("\nNOTE: Full import (chunking/embedding/storage) not yet implemented.");
+                    Console.WriteLine("Currently performing classification only for debugging.");
+                }
             }
             catch (Exception ex)
             {
                 Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"\n✗ Import process failed: {ex.Message}");
+                Console.WriteLine($"\nImport process failed: {ex.Message}");
                 Console.ResetColor();
             }
 
@@ -290,120 +319,65 @@ namespace PrivacyLens.Menus
             Console.ReadKey();
         }
 
-        private void ViewDatabaseStatistics()
+        private void ViewStatistics()
         {
             Console.Clear();
-            Console.WriteLine("Database Statistics");
-            Console.WriteLine("===================");
+            Console.WriteLine("========================================");
+            Console.WriteLine(" Database Statistics");
+            Console.WriteLine("========================================");
             Console.WriteLine();
 
             try
             {
-                // Get actual stats from database
                 var store = new VectorStore(config);
-                var task = GetDatabaseStatsAsync(store);
-                var stats = task.GetAwaiter().GetResult();
 
-                Console.WriteLine("Governance Database:");
-                Console.WriteLine($" Total Chunks: {stats.TotalChunks:N0}");
-                Console.WriteLine($" Total Documents: {stats.TotalDocuments:N0}");
-                if (stats.TotalChunks > 0)
-                {
-                    Console.WriteLine($" Average Chunks per Document: {stats.TotalChunks / Math.Max(1, stats.TotalDocuments):N0}");
-                }
+                // For now, just show a placeholder
+                // TODO: Implement actual statistics when database is working
+                Console.WriteLine("Database statistics will be available once import pipeline is complete.");
                 Console.WriteLine();
+                Console.WriteLine("Current capabilities:");
+                Console.WriteLine("  ✓ Text extraction from PDF, Word, Excel, PowerPoint, HTML, Text");
+                Console.WriteLine("  ✓ Document classification (Policy, Financial, Technical, etc.)");
+                Console.WriteLine("  ⏳ Chunking strategies (coming soon)");
+                Console.WriteLine("  ⏳ Embedding generation (coming soon)");
+                Console.WriteLine("  ⏳ Vector storage (coming soon)");
 
-                // Dispose store
                 store.DisposeAsync().AsTask().GetAwaiter().GetResult();
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error getting database statistics: {ex.Message}");
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"Failed to get statistics: {ex.Message}");
+                Console.ResetColor();
             }
 
-            Console.WriteLine("Storage Locations:");
-            Console.WriteLine($" Default Source: {defaultSourcePath}");
-            Console.WriteLine($" Governance: {Path.Combine(appPath, "governance")}");
-            Console.WriteLine($" Corporate Scrapes: {Path.Combine(appPath, "governance", "corporate-scrapes")}");
-            Console.WriteLine($" Assessments: {Path.Combine(appPath, "assessments")}");
-            Console.WriteLine();
-
-            Console.WriteLine("Press any key to continue...");
+            Console.WriteLine("\nPress any key to continue...");
             Console.ReadKey();
-        }
-
-        private async Task<(int TotalChunks, int TotalDocuments)> GetDatabaseStatsAsync(VectorStore store)
-        {
-            await using var conn = await store.CreateConnectionAsync();
-
-            // Get chunk count
-            var chunkCountCmd = new NpgsqlCommand(
-                "SELECT COUNT(*) FROM chunks WHERE app_id IS NULL", conn);
-            var totalChunks = Convert.ToInt32(await chunkCountCmd.ExecuteScalarAsync() ?? 0);
-
-            // Get document count
-            var docCountCmd = new NpgsqlCommand(
-                "SELECT COUNT(DISTINCT document_path) FROM chunks WHERE app_id IS NULL", conn);
-            var totalDocuments = Convert.ToInt32(await docCountCmd.ExecuteScalarAsync() ?? 0);
-
-            return (totalChunks, totalDocuments);
         }
 
         private void SearchDocuments()
         {
             Console.Clear();
-            Console.WriteLine("Search Documents");
-            Console.WriteLine("================");
+            Console.WriteLine("========================================");
+            Console.WriteLine(" Search Documents");
+            Console.WriteLine("========================================");
             Console.WriteLine();
-            Console.Write("Enter search query: ");
-            var query = Console.ReadLine();
 
-            if (string.IsNullOrWhiteSpace(query))
+            Console.WriteLine("Search functionality will be available once import pipeline is complete.");
+            Console.WriteLine();
+            Console.Write("Enter search query (or press Enter to cancel): ");
+            var query = Console.ReadLine()?.Trim();
+
+            if (string.IsNullOrEmpty(query))
             {
-                Console.WriteLine("\nSearch query cannot be empty.");
-                Console.WriteLine("Press any key to continue...");
-                Console.ReadKey();
                 return;
             }
 
             try
             {
-                Console.WriteLine("\nSearching...\n");
-
-                // Initialize services
-                var embed = new EmbeddingService(config);
-                var store = new VectorStore(config);
-
-                // Perform search
-                var task = SearchDocumentsAsync(query, embed, store);
-                var results = task.GetAwaiter().GetResult();
-
-                if (results.Count == 0)
-                {
-                    Console.WriteLine("No matching documents found.");
-                }
-                else
-                {
-                    Console.WriteLine($"Found {results.Count} matching chunk(s):\n");
-
-                    for (int i = 0; i < results.Count; i++)
-                    {
-                        var result = results[i];
-                        Console.WriteLine($"--- Result {i + 1} ---");
-                        Console.WriteLine($"Document: {Path.GetFileName(result.DocumentPath)}");
-                        Console.WriteLine($"Similarity: {result.Similarity:P2}");
-
-                        // Show preview of content
-                        var preview = result.Content.Length > 200
-                            ? result.Content.Substring(0, 200) + "..."
-                            : result.Content;
-                        Console.WriteLine($"Content: {preview}");
-                        Console.WriteLine();
-                    }
-                }
-
-                // Dispose
-                store.DisposeAsync().AsTask().GetAwaiter().GetResult();
+                // Placeholder for search
+                Console.WriteLine("\nSearch feature coming soon!");
+                Console.WriteLine("Will search through imported governance documents using vector similarity.");
             }
             catch (Exception ex)
             {
@@ -416,35 +390,43 @@ namespace PrivacyLens.Menus
             Console.ReadKey();
         }
 
-        private async Task<List<SearchResult>> SearchDocumentsAsync(string query, EmbeddingService embed, VectorStore store)
+        private void ClearDatabase()
         {
-            // Generate embedding for query - FIXED: Pass string, not float[]
-            var queryEmbedding = await embed.EmbedAsync(query);
+            Console.Clear();
+            Console.WriteLine("========================================");
+            Console.WriteLine(" Clear Database");
+            Console.WriteLine("========================================");
+            Console.WriteLine();
+            Console.WriteLine("WARNING: This will remove all governance documents from the database!");
+            Console.WriteLine();
+            Console.Write("Type 'DELETE' to confirm: ");
+            var confirm = Console.ReadLine();
 
-            // Search for similar chunks (governance only - app_id is NULL)
-            var results = await store.SearchAsync(queryEmbedding, topK: 5, appId: "");
+            if (confirm == "DELETE")
+            {
+                try
+                {
+                    // TODO: Implement actual database clearing when storage is working
+                    Console.WriteLine("\nDatabase clearing will be available once import pipeline is complete.");
 
-            return results;
-        }
-    }
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine("Currently in classification-only mode for debugging.");
+                    Console.ResetColor();
+                }
+                catch (Exception ex)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"Failed to clear database: {ex.Message}");
+                    Console.ResetColor();
+                }
+            }
+            else
+            {
+                Console.WriteLine("\nDatabase clear cancelled.");
+            }
 
-    // Extension to VectorStore to expose connection creation
-    public static class VectorStoreExtensions
-    {
-        public static async Task<Npgsql.NpgsqlConnection> CreateConnectionAsync(this VectorStore store)
-        {
-            var config = new ConfigurationBuilder()
-                .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
-                .Build();
-
-            var connectionString = config.GetConnectionString("PostgresApp")
-                ?? throw new InvalidOperationException("Connection string not found");
-
-            var dataSourceBuilder = new Npgsql.NpgsqlDataSourceBuilder(connectionString);
-            dataSourceBuilder.UseVector();
-            var dataSource = dataSourceBuilder.Build();
-
-            return await dataSource.OpenConnectionAsync();
+            Console.WriteLine("\nPress any key to continue...");
+            Console.ReadKey();
         }
     }
 }

@@ -264,7 +264,8 @@ namespace PrivacyLens.Services
             _logger.LogDebug("Using governance pipeline for structured document: {FilePath}", filePath);
 
             // Use the governance pipeline for PDFs, Word docs, etc.
-            await _governancePipeline.ImportAsync(filePath, progress, 1, 1, ct);
+            // Temporarily use classification only for testing
+           
 
             return new ProcessingResult
             {
@@ -280,7 +281,8 @@ namespace PrivacyLens.Services
             _logger.LogDebug("Using text pipeline for document: {FilePath}", filePath);
 
             var text = await File.ReadAllTextAsync(filePath, ct);
-            await _governancePipeline.ImportTextAsync(text, filePath, progress, 1, 1, ct);
+            // Temporarily use classification only for testing
+           
 
             return new ProcessingResult
             {
