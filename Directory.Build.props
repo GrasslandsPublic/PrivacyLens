@@ -1,0 +1,16 @@
+<Project>
+  <PropertyGroup>
+    <!-- Modern C# and analyzers -->
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+
+    <!-- Keep warnings visible but not blocking initially -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+
+    <!-- Deterministic builds -->
+    <Deterministic>true</Deterministic>
+    <DebugType>portable</DebugType>
+  </PropertyGroup>
+</Project>
